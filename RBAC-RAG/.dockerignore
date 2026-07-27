@@ -1,0 +1,13 @@
+**/.env
+**/.env.*
+**/venv
+**/node_modules
+**/__pycache__
+**/.git
+**/build
+**/.pytest_cache
+**/test_reports
+**/.emergent
+memory
+*.md
+!README.md

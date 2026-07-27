@@ -13,7 +13,20 @@ load_dotenv(Path(__file__).parent / ".env", override=True)
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 
-engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True, pool_size=10, max_overflow=20)
+# Supabase (and most hosted Postgres) requires SSL.
+_connect_args = {}
+_ssl_flag = os.environ.get("DATABASE_SSL", "").strip().lower()
+if _ssl_flag in {"1", "true", "yes"} or "supabase.co" in DATABASE_URL.lower():
+    _connect_args["ssl"] = True
+
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=10,
+    connect_args=_connect_args,
+)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
