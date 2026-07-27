@@ -7,7 +7,8 @@
 // On any 401 from the server we drop the token immediately.
 import axios from 'axios';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+// Empty string = same-origin (Hugging Face Space). Local .env sets http://localhost:8000.
+const BACKEND_URL = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "");
 export const API_BASE = `${BACKEND_URL}/api`;
 
 const TOKEN_KEY = 'sentry_token';

@@ -11,6 +11,8 @@ import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, APIRouter
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from starlette.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
@@ -68,3 +70,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve the React build on Hugging Face Spaces (FRONTEND_BUILD_DIR set in Dockerfile).
+_frontend_dir = Path(os.environ.get("FRONTEND_BUILD_DIR", "")).resolve()
+if _frontend_dir.is_dir() and (_frontend_dir / "index.html").exists():
+    _assets = _frontend_dir / "static"
+    if _assets.is_dir():
+        app.mount("/static", StaticFiles(directory=str(_assets)), name="static")
+
+    @app.get("/{full_path:path}")
+    async def spa_fallback(full_path: str):
+        candidate = _frontend_dir / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(_frontend_dir / "index.html")
