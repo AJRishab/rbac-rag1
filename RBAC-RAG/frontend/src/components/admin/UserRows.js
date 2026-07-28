@@ -28,17 +28,17 @@ export function PendingUserRow({ user, onApproved }) {
   };
 
   return (
-    <div data-testid={ADMIN.pendingUserRow} className="px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4">
-      <div className="flex-1 min-w-0">
-        <div className="text-sm text-slate-100 truncate">{user.email}</div>
-        <div className="mt-0.5 flex items-center gap-2 text-[10px] font-mono text-slate-500">
+    <div data-testid={ADMIN.pendingUserRow} className="px-3 sm:px-4 py-3 flex flex-col gap-3">
+      <div className="min-w-0">
+        <div className="text-sm text-slate-100 break-all">{user.email}</div>
+        <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] font-mono text-slate-500">
           <span>registered {new Date(user.created_at).toLocaleDateString()}</span>
           <span className="inline-flex items-center gap-1 rounded-full border border-amber-400/25 bg-amber-500/10 px-2 py-0.5 text-amber-200 text-[10px] font-mono">pending</span>
         </div>
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-col min-[400px]:flex-row items-stretch min-[400px]:items-center gap-2">
         <Select value={role} onValueChange={setRole}>
-          <SelectTrigger data-testid={ADMIN.pendingUserRoleSelect} className="w-36 bg-black/30 border-white/15 text-slate-100 focus:ring-cyan-400/40 focus:ring-offset-0">
+          <SelectTrigger data-testid={ADMIN.pendingUserRoleSelect} className="w-full min-[400px]:w-36 bg-black/30 border-white/15 text-slate-100 focus:ring-cyan-400/40 focus:ring-offset-0">
             <SelectValue />
           </SelectTrigger>
           <SelectContent className="bg-[hsl(var(--card))] border-white/10">
@@ -51,7 +51,7 @@ export function PendingUserRow({ user, onApproved }) {
           data-testid={ADMIN.pendingUserApproveButton}
           onClick={approve}
           disabled={submitting}
-          className="bg-cyan-500 text-slate-900 hover:bg-cyan-400 font-medium"
+          className="w-full min-[400px]:w-auto bg-cyan-500 text-slate-900 hover:bg-cyan-400 font-medium"
         >
           <CheckCircle2 className="w-4 h-4 mr-1" strokeWidth={2} />
           Approve
@@ -82,15 +82,15 @@ export function ApprovedUserRow({ user, onChanged }) {
   };
 
   return (
-    <div data-testid={ADMIN.approvedUserRow} className="px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4">
+    <div data-testid={ADMIN.approvedUserRow} className="px-3 sm:px-4 py-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
       <div className="flex-1 min-w-0">
-        <div className="text-sm text-slate-100 truncate">{user.email}</div>
+        <div className="text-sm text-slate-100 break-all">{user.email}</div>
         <div className="mt-0.5 text-[10px] font-mono text-slate-500">created {new Date(user.created_at).toLocaleDateString()}</div>
       </div>
-      <div className="flex items-center gap-2">
-        <RoleBadge role={role} />
+      <div className="flex items-center gap-2 min-w-0">
+        <RoleBadge role={role} className="shrink-0" />
         <Select value={role} onValueChange={save} disabled={saving}>
-          <SelectTrigger data-testid={ADMIN.approvedUserRoleSelect} className="w-36 bg-black/30 border-white/15 text-slate-100 focus:ring-cyan-400/40 focus:ring-offset-0">
+          <SelectTrigger data-testid={ADMIN.approvedUserRoleSelect} className="flex-1 sm:flex-none sm:w-36 bg-black/30 border-white/15 text-slate-100 focus:ring-cyan-400/40 focus:ring-offset-0">
             <SelectValue />
           </SelectTrigger>
           <SelectContent className="bg-[hsl(var(--card))] border-white/10">

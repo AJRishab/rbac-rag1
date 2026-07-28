@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Upload, FileText, X, Plus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -14,10 +14,10 @@ const FILE_EXT_RE = /\.(txt|md|markdown|pdf|docx)$/i;
 
 function RoleChecklist({ roles, onToggle, testId }) {
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+    <div className="grid grid-cols-1 min-[380px]:grid-cols-2 sm:grid-cols-4 gap-2">
       {ROLES.map((r) => (
         <label key={r} className={cn(
-          'flex items-center gap-2 rounded-lg border px-3 py-2 cursor-pointer transition-colors',
+          'flex items-center gap-2 rounded-lg border px-3 py-2.5 sm:py-2 cursor-pointer transition-colors touch-manipulation',
           roles[r] ? 'border-cyan-400/40 bg-cyan-500/8' : 'border-white/10 bg-white/[0.02] hover:bg-white/[0.04]',
         )}>
           <Checkbox
@@ -43,7 +43,7 @@ function Dropzone({ file, dragOver, onSelectFile, onClearFile, inputRef, onDrop,
       onDragLeave={() => setDragOver(false)}
       onDrop={onDrop}
       className={cn(
-        'cursor-pointer rounded-xl border border-dashed px-4 py-6 text-center transition-colors',
+        'cursor-pointer rounded-xl border border-dashed px-3 sm:px-4 py-5 sm:py-6 text-center transition-colors',
         dragOver ? 'border-cyan-400/50 bg-cyan-500/8 shadow-[0_0_0_1px_rgba(34,211,238,0.2)]' : 'border-white/20 bg-white/[0.02] hover:bg-white/[0.04]',
       )}
     >
@@ -56,13 +56,14 @@ function Dropzone({ file, dragOver, onSelectFile, onClearFile, inputRef, onDrop,
         className="hidden"
       />
       {file ? (
-        <div className="flex items-center justify-center gap-2 text-sm text-slate-100">
-          <FileText className="w-4 h-4 text-cyan-300" strokeWidth={1.75} />
-          <span className="font-mono">{file.name}</span>
+        <div className="flex items-center justify-center gap-2 text-sm text-slate-100 min-w-0 px-1">
+          <FileText className="w-4 h-4 text-cyan-300 shrink-0" strokeWidth={1.75} />
+          <span className="font-mono truncate min-w-0">{file.name}</span>
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onClearFile(); }}
-            className="text-slate-400 hover:text-red-300 p-1"
+            className="text-slate-400 hover:text-red-300 p-1.5 shrink-0 touch-manipulation"
+            aria-label="Clear file"
           >
             <X className="w-4 h-4" strokeWidth={2} />
           </button>
@@ -70,7 +71,8 @@ function Dropzone({ file, dragOver, onSelectFile, onClearFile, inputRef, onDrop,
       ) : (
         <div className="flex flex-col items-center gap-2">
           <Upload className="w-5 h-5 text-cyan-300" strokeWidth={1.75} />
-          <div className="text-sm text-slate-200">Drop file here or click to browse</div>
+          <div className="text-sm text-slate-200">Tap to choose a file</div>
+          <div className="text-[10px] font-mono text-slate-500 hidden sm:block">or drop here</div>
           <div className="text-[10px] font-mono text-slate-500">.txt / .md / .pdf / .docx</div>
         </div>
       )}
@@ -135,12 +137,12 @@ export function UploadCard({ onUploaded }) {
   };
 
   return (
-    <div className="panel">
-      <div className="px-4 py-3 border-b border-white/10 flex items-center justify-between">
+    <div className="panel overflow-hidden">
+      <div className="px-3 sm:px-4 py-3 border-b border-white/10 flex flex-col gap-0.5 sm:flex-row sm:items-center sm:justify-between">
         <span className="mono-label text-cyan-300">Upload document</span>
         <span className="text-[10px] font-mono text-slate-500">.txt / .md / .pdf / .docx · max 20 MB</span>
       </div>
-      <div className="p-4 space-y-4">
+      <div className="p-3 sm:p-4 space-y-4">
         <div>
           <span className="mono-label text-slate-400 mb-1 block">Title</span>
           <Input
@@ -148,7 +150,7 @@ export function UploadCard({ onUploaded }) {
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             placeholder="e.g. HR Policy 2026"
-            className="bg-black/30 border-white/15 text-slate-100 placeholder:text-slate-500 focus-visible:ring-cyan-400/40 focus-visible:ring-offset-0"
+            className="bg-black/30 border-white/15 text-slate-100 placeholder:text-slate-500 focus-visible:ring-cyan-400/40 focus-visible:ring-offset-0 text-base sm:text-sm"
           />
         </div>
         <div>
@@ -167,12 +169,12 @@ export function UploadCard({ onUploaded }) {
           <span className="mono-label text-slate-400 mb-2 block">Allowed roles</span>
           <RoleChecklist roles={roles} onToggle={toggleRole} testId={ADMIN.docUploadRoleCheckbox} />
         </div>
-        <div className="pt-2 flex justify-end">
+        <div className="pt-1 sm:pt-2 flex sm:justify-end">
           <Button
             data-testid={ADMIN.docUploadSubmit}
             onClick={submit}
             disabled={submitting || !file || selectedRoles.length === 0}
-            className="bg-cyan-500 text-slate-900 hover:bg-cyan-400 font-medium disabled:opacity-60"
+            className="w-full sm:w-auto bg-cyan-500 text-slate-900 hover:bg-cyan-400 font-medium disabled:opacity-60 min-h-11"
           >
             {submitting ? 'Uploading + embedding…' : (<>Upload document <Plus className="w-4 h-4 ml-1" strokeWidth={2} /></>)}
           </Button>

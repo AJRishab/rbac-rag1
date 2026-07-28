@@ -46,7 +46,7 @@ function EditDialog({ doc, open, onOpenChange, onSaved }) {
           data-testid={ADMIN.docListEditButton}
           variant="outline"
           size="sm"
-          className="border-white/20 bg-transparent hover:bg-white/[0.04] text-slate-100"
+          className="flex-1 sm:flex-none border-white/20 bg-transparent hover:bg-white/[0.04] text-slate-100"
         >
           <PencilLine className="w-3.5 h-3.5 mr-1" strokeWidth={1.75} />
           Edit
@@ -57,7 +57,7 @@ function EditDialog({ doc, open, onOpenChange, onSaved }) {
           <DialogTitle className="font-display">Edit access</DialogTitle>
         </DialogHeader>
         <div className="space-y-3">
-          <div className="text-sm text-slate-300">{doc.title}</div>
+          <div className="text-sm text-slate-300 break-words">{doc.title}</div>
           <RoleChecklist
             roles={roles}
             onToggle={(r) => setRoles((prev) => ({ ...prev, [r]: !prev[r] }))}
@@ -66,12 +66,12 @@ function EditDialog({ doc, open, onOpenChange, onSaved }) {
           <div className="text-[11px] text-slate-500">Updating roles will re-tag all chunks of this document.</div>
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} className="border-white/20 bg-transparent text-slate-200">Cancel</Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)} className="w-full sm:w-auto border-white/20 bg-transparent text-slate-200">Cancel</Button>
           <Button
             data-testid={ADMIN.docEditSave}
             onClick={save}
             disabled={saving}
-            className="bg-cyan-500 text-slate-900 hover:bg-cyan-400 font-medium"
+            className="w-full sm:w-auto bg-cyan-500 text-slate-900 hover:bg-cyan-400 font-medium"
           >
             {saving ? 'Saving…' : 'Save'}
           </Button>
@@ -84,14 +84,18 @@ function EditDialog({ doc, open, onOpenChange, onSaved }) {
 function DocumentMeta({ doc }) {
   return (
     <div className="flex-1 min-w-0">
-      <div className="flex items-center gap-2 text-sm text-slate-100 min-w-0">
-        <FileText className="w-4 h-4 text-cyan-300 shrink-0" strokeWidth={1.75} />
-        <span className="truncate font-medium">{doc.title}</span>
-        <span className="font-mono text-[10px] text-slate-500 truncate">{doc.filename}</span>
+      <div className="flex items-start gap-2 text-sm text-slate-100 min-w-0">
+        <FileText className="w-4 h-4 text-cyan-300 shrink-0 mt-0.5" strokeWidth={1.75} />
+        <div className="min-w-0 flex-1">
+          <div className="font-medium break-words">{doc.title}</div>
+          <div className="font-mono text-[10px] text-slate-500 truncate mt-0.5">{doc.filename}</div>
+        </div>
       </div>
-      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
         {(doc.allowed_roles || []).map((r) => <RoleBadge key={r} role={r} />)}
-        <span className="text-[10px] font-mono text-slate-500">· {doc.chunk_count} chunks · {new Date(doc.uploaded_at).toLocaleDateString()}</span>
+        <span className="text-[10px] font-mono text-slate-500">
+          · {doc.chunk_count} chunks · {new Date(doc.uploaded_at).toLocaleDateString()}
+        </span>
       </div>
     </div>
   );
@@ -118,9 +122,9 @@ export function DocumentRow({ doc, onChanged }) {
   };
 
   return (
-    <div data-testid={ADMIN.docListRow} className="px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4">
+    <div data-testid={ADMIN.docListRow} className="px-3 sm:px-4 py-3 flex flex-col gap-3">
       <DocumentMeta doc={doc} />
-      <div className="flex items-center gap-2">
+      <div className="flex items-stretch sm:items-center gap-2">
         <EditDialog doc={doc} open={editOpen} onOpenChange={setEditOpen} onSaved={onChanged} />
         <Button
           data-testid={ADMIN.docListDeleteButton}
@@ -128,7 +132,7 @@ export function DocumentRow({ doc, onChanged }) {
           size="sm"
           onClick={del}
           disabled={deleting}
-          className="border-red-400/25 bg-red-500/5 hover:bg-red-500/10 text-red-200"
+          className="flex-1 sm:flex-none border-red-400/25 bg-red-500/5 hover:bg-red-500/10 text-red-200"
         >
           <Trash2 className="w-3.5 h-3.5 mr-1" strokeWidth={1.75} />
           {deleting ? 'Deleting…' : 'Delete'}

@@ -86,6 +86,12 @@ body {
 
 /* App shell: base surface with subtle radial glow + faint grid */
 .app-shell {
+    min-height: 100vh;
+    min-height: 100dvh;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
     background-color: hsl(var(--background));
     background-image:
         radial-gradient(900px 480px at 15% -5%, rgba(34, 211, 238, 0.10), transparent 60%),
