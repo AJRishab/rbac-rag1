@@ -19,14 +19,15 @@ export function MessageBubble({ message }) {
     <div className={cn('flex w-full', isUser ? 'justify-end' : 'justify-start')}>
       <div
         className={cn(
+          'min-w-0',
           isUser
-            ? 'ml-auto max-w-[92%] sm:max-w-[75%] rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3'
-            : 'mr-auto max-w-[92%] sm:max-w-[82%] rounded-2xl border border-white/10 bg-[rgba(15,23,42,0.72)] px-4 py-3 shadow-[0_0_0_1px_rgba(148,163,184,0.06)]'
+            ? 'ml-auto max-w-[min(100%,28rem)] sm:max-w-[75%] rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2.5 sm:px-4 sm:py-3'
+            : 'mr-auto w-full max-w-[min(100%,42rem)] sm:max-w-[82%] rounded-2xl border border-white/10 bg-[rgba(15,23,42,0.72)] px-3 py-2.5 sm:px-4 sm:py-3 shadow-[0_0_0_1px_rgba(148,163,184,0.06)]'
         )}
         data-testid={isUser ? CHAT.messageBubbleUser : CHAT.messageBubbleAssistant}
       >
         {!isUser && (
-          <div className="flex items-center gap-2 mb-1.5">
+          <div className="flex items-center gap-2 mb-1.5 flex-wrap">
             <span className="inline-flex items-center gap-1.5 text-[10px] font-mono tracking-[0.15em] uppercase text-cyan-300">
               <Shield className="w-3 h-3" strokeWidth={1.5} />
               Sentry
@@ -34,7 +35,10 @@ export function MessageBubble({ message }) {
             <span className="text-[10px] font-mono text-slate-500">{formatTime(message.created_at)}</span>
           </div>
         )}
-        <div className={isUser ? 'text-sm text-slate-100 whitespace-pre-wrap' : 'answer-prose whitespace-pre-wrap'}>
+        <div className={cn(
+          'break-words [overflow-wrap:anywhere]',
+          isUser ? 'text-sm text-slate-100 whitespace-pre-wrap' : 'answer-prose whitespace-pre-wrap',
+        )}>
           {message.content}
         </div>
 

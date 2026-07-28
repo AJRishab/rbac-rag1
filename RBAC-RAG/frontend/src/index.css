@@ -164,6 +164,8 @@ body {
     line-height: 1.7;
     color: rgb(226, 232, 240);
     font-size: 0.95rem;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 .answer-prose p {
     margin: 0 0 0.7rem 0;

@@ -28,21 +28,24 @@ const SUGGESTIONS_BY_ROLE = {
 export function EmptyState({ role }) {
   const suggestions = SUGGESTIONS_BY_ROLE[role] || SUGGESTIONS_BY_ROLE.employee;
   return (
-    <div data-testid={CHAT.emptyState} className="panel p-8 sm:p-10">
-      <div className="flex items-start gap-4">
-        <div className="w-12 h-12 rounded-lg bg-cyan-500/15 border border-cyan-400/30 flex items-center justify-center shrink-0">
+    <div data-testid={CHAT.emptyState} className="panel p-4 sm:p-8 lg:p-10">
+      <div className="flex flex-col sm:flex-row items-start gap-3 sm:gap-4">
+        <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-lg bg-cyan-500/15 border border-cyan-400/30 flex items-center justify-center shrink-0">
           <Sparkles className="w-5 h-5 text-cyan-300" strokeWidth={1.75} />
         </div>
-        <div className="flex-1">
+        <div className="flex-1 min-w-0">
           <div className="mono-label text-cyan-300 mb-1">// Ready</div>
-          <h2 className="font-display font-semibold text-2xl tracking-tight">Ask your knowledge base.</h2>
+          <h2 className="font-display font-semibold text-xl sm:text-2xl tracking-tight">Ask your knowledge base.</h2>
           <p className="text-sm text-slate-400 mt-1 leading-relaxed max-w-xl">
             Every answer is built only from documents your role is allowed to see. Citations and
             retrieval details are attached to every response.
           </p>
-          <div className="mt-5 flex flex-wrap gap-2">
+          <div className="mt-4 sm:mt-5 flex flex-col sm:flex-row sm:flex-wrap gap-2">
             {suggestions.map((s) => (
-              <span key={s} className="text-xs text-slate-300 border border-white/10 bg-white/[0.02] rounded-full px-3 py-1">
+              <span
+                key={s}
+                className="text-xs text-slate-300 border border-white/10 bg-white/[0.02] rounded-xl sm:rounded-full px-3 py-2 sm:py-1 leading-snug"
+              >
                 {s}
               </span>
             ))}

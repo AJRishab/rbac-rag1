@@ -11,7 +11,7 @@ export function CitationChip({ citation, index }) {
     >
       <FileText className="w-3 h-3 text-cyan-300" strokeWidth={1.5} />
       <span className="font-mono text-[10px] text-cyan-300">#{index + 1}</span>
-      <span className="truncate max-w-[240px]">{citation.title}</span>
+      <span className="truncate max-w-[min(12rem,55vw)] sm:max-w-[240px]">{citation.title}</span>
     </span>
   );
 }

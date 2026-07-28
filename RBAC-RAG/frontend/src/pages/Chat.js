@@ -160,15 +160,15 @@ export default function Chat() {
 
   return (
     <div className="chat-shell text-slate-100">
-      <div className="h-14 border-b border-white/8 backdrop-blur-md bg-[hsl(var(--background))]/60 flex items-center justify-between px-3 sm:px-4">
-        <div className="flex items-center gap-2">
+      <div className="h-14 shrink-0 border-b border-white/8 backdrop-blur-md bg-[hsl(var(--background))]/60 flex items-center justify-between gap-2 px-2 sm:px-4">
+        <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
           <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
             <SheetTrigger asChild>
-              <Button variant="ghost" size="icon" className="lg:hidden text-slate-300 hover:bg-white/5">
+              <Button variant="ghost" size="icon" className="lg:hidden shrink-0 text-slate-300 hover:bg-white/5">
                 <Menu className="w-4 h-4" strokeWidth={1.75} />
               </Button>
             </SheetTrigger>
-            <SheetContent side="left" className="p-0 bg-[hsl(var(--background))] border-white/8 w-80">
+            <SheetContent side="left" className="p-0 bg-[hsl(var(--background))] border-white/8 w-[min(20rem,88vw)]">
               <ChatSidebar
                 user={user}
                 conversations={conversations}
@@ -179,17 +179,21 @@ export default function Chat() {
               />
             </SheetContent>
           </Sheet>
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-md bg-cyan-500/15 border border-cyan-400/30 flex items-center justify-center">
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="w-7 h-7 rounded-md bg-cyan-500/15 border border-cyan-400/30 flex items-center justify-center shrink-0">
               <Shield className="w-4 h-4 text-cyan-300" strokeWidth={1.75} />
             </div>
-            <span className="font-display font-bold text-lg hidden sm:inline">SENTRY<span className="text-cyan-300">/RAG</span></span>
+            <span className="font-display font-bold text-lg hidden sm:inline truncate">
+              SENTRY<span className="text-cyan-300">/RAG</span>
+            </span>
           </div>
         </div>
 
-        <div className="flex items-center gap-2 sm:gap-3">
-          <div className="flex items-center gap-2 border border-white/10 bg-white/[0.03] px-2 py-1 rounded-full">
-            <span data-testid={CHAT.topBarUserEmail} className="font-mono text-[11px] text-slate-200 max-w-[180px] truncate">{user?.email}</span>
+        <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 sm:gap-2 border border-white/10 bg-white/[0.03] px-1.5 sm:px-2 py-1 rounded-full max-w-[42vw] sm:max-w-none">
+            <span data-testid={CHAT.topBarUserEmail} className="font-mono text-[10px] sm:text-[11px] text-slate-200 truncate hidden min-[400px]:inline max-w-[7rem] sm:max-w-[180px]">
+              {user?.email}
+            </span>
             <RoleBadge role={user?.role} testId={CHAT.topBarRoleBadge} />
           </div>
           {user?.role === 'admin' && (
@@ -198,10 +202,10 @@ export default function Chat() {
               onClick={() => navigate('/admin')}
               variant="outline"
               size="sm"
-              className="border-cyan-400/30 bg-cyan-500/8 hover:bg-cyan-500/12 text-cyan-100"
+              className="border-cyan-400/30 bg-cyan-500/8 hover:bg-cyan-500/12 text-cyan-100 px-2 sm:px-3"
             >
-              <KeyRound className="w-3.5 h-3.5 mr-1" strokeWidth={1.75} />
-              Admin
+              <KeyRound className="w-3.5 h-3.5 sm:mr-1" strokeWidth={1.75} />
+              <span className="hidden sm:inline">Admin</span>
             </Button>
           )}
           <Button
@@ -209,9 +213,9 @@ export default function Chat() {
             onClick={() => { logout(); navigate('/login'); }}
             variant="ghost"
             size="sm"
-            className="text-slate-300 hover:bg-white/5"
+            className="text-slate-300 hover:bg-white/5 px-2 sm:px-3"
           >
-            <LogOut className="w-3.5 h-3.5 mr-1" strokeWidth={1.75} />
+            <LogOut className="w-3.5 h-3.5 sm:mr-1" strokeWidth={1.75} />
             <span className="hidden sm:inline">Sign out</span>
           </Button>
         </div>
@@ -230,41 +234,42 @@ export default function Chat() {
         </aside>
 
         <main className="flex-1 min-w-0 flex flex-col">
-          <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto px-4 sm:px-6 lg:px-8 py-6">
-            <div className="max-w-4xl mx-auto space-y-5">
+          <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-3 sm:px-6 lg:px-8 py-4 sm:py-6">
+            <div className="max-w-4xl mx-auto space-y-4 sm:space-y-5">
               {messages.length === 0 && !loadingMessages && <EmptyState role={user?.role} />}
               {messages.map((m) => (<MessageBubble key={m.id} message={m} />))}
               {sending && <ThinkingBubble />}
             </div>
           </div>
 
-          <div className="border-t border-white/8 bg-[hsl(var(--background))]/70 backdrop-blur-md px-3 sm:px-6 py-3">
+          <div className="shrink-0 border-t border-white/8 bg-[hsl(var(--background))]/70 backdrop-blur-md px-2 sm:px-6 py-2.5 sm:py-3 pb-[max(0.625rem,env(safe-area-inset-bottom))]">
             <div className="max-w-4xl mx-auto">
-              <div className="panel-inset flex items-end gap-2 p-2">
+              <div className="panel-inset flex items-end gap-2 p-1.5 sm:p-2">
                 <Textarea
                   data-testid={CHAT.messageInput}
-                  placeholder={user?.role === 'admin' ? 'Ask anything (admin bypasses RBAC)…' : `Ask as ${user?.role}…`}
+                  placeholder={user?.role === 'admin' ? 'Ask anything…' : `Ask as ${user?.role}…`}
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={onKeyDown}
                   disabled={sending}
                   rows={1}
-                  className="resize-none bg-transparent border-0 focus-visible:ring-0 text-slate-100 placeholder:text-slate-500 max-h-40 min-h-[36px] flex-1 py-2"
+                  className="resize-none bg-transparent border-0 focus-visible:ring-0 text-slate-100 placeholder:text-slate-500 max-h-32 sm:max-h-40 min-h-[40px] flex-1 py-2.5 text-base sm:text-sm"
                 />
                 <Button
                   data-testid={CHAT.sendButton}
                   onClick={sendMessage}
                   disabled={sending || !input.trim()}
-                  className="bg-cyan-500 text-slate-900 hover:bg-cyan-400 font-medium shrink-0"
+                  size="icon"
+                  className="bg-cyan-500 text-slate-900 hover:bg-cyan-400 font-medium shrink-0 h-10 w-10"
                 >
                   <Send className="w-4 h-4" strokeWidth={2} />
                 </Button>
               </div>
-              <div className="mt-1.5 flex items-center justify-between px-1">
-                <div className="text-[10px] font-mono text-slate-500">
+              <div className="mt-1.5 flex items-center justify-between gap-2 px-1">
+                <div className="text-[10px] font-mono text-slate-500 truncate min-w-0">
                   {activeConversation ? activeConversation.title : 'New conversation'}
                 </div>
-                <div className="text-[10px] font-mono text-slate-500">
+                <div className="text-[10px] font-mono text-slate-500 shrink-0 hidden sm:block">
                   Enter to send · Shift+Enter for newline
                 </div>
               </div>
