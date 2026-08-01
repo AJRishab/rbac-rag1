@@ -8,7 +8,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deps import get_db, require_admin
-from schemas import UserOut, ApproveUserRequest, DocumentOut, UpdateDocRolesRequest
+from schemas import (
+    UserOut, ApproveUserRequest, DocumentOut, UpdateDocRolesRequest,
+    ChunkOut, UpdateChunkRolesRequest,
+)
 from ingest import parse_file, chunk_text
 import nim_client
 
@@ -78,14 +81,14 @@ def _fmt_vec(v: list[float]) -> str:
 @router.get("/documents", response_model=list[DocumentOut])
 async def list_documents(admin: dict = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     result = await db.execute(text(
-        "SELECT d.id, d.title, d.filename, d.allowed_roles, d.chunk_count, d.uploaded_at, u.email AS uploader_email "
+        "SELECT d.id, d.title, d.filename, d.allowed_roles, d.status, d.chunk_count, d.uploaded_at, u.email AS uploader_email "
         "FROM documents d LEFT JOIN users u ON u.id = d.uploaded_by "
         "ORDER BY d.uploaded_at DESC"
     ))
     return [
         DocumentOut(
             id=str(r.id), title=r.title, filename=r.filename,
-            allowed_roles=list(r.allowed_roles or []), chunk_count=r.chunk_count,
+            allowed_roles=list(r.allowed_roles or []), status=r.status, chunk_count=r.chunk_count,
             uploaded_at=r.uploaded_at, uploaded_by_email=r.uploader_email,
         )
         for r in result.fetchall()
@@ -146,21 +149,22 @@ async def _persist_document(
     roles: list[str],
     chunks: list[str],
     embeddings: list[list[float]],
+    chunk_roles: list[list[str]],
 ):
     doc = (await db.execute(
         text(
-            "INSERT INTO documents (title, filename, uploaded_by, allowed_roles, chunk_count) "
-            "VALUES (:t, :f, CAST(:u AS uuid), :r, :c) "
-            "RETURNING id, title, filename, allowed_roles, chunk_count, uploaded_at"
+            "INSERT INTO documents (title, filename, uploaded_by, allowed_roles, status, chunk_count) "
+            "VALUES (:t, :f, CAST(:u AS uuid), :r, 'pending_review', :c) "
+            "RETURNING id, title, filename, allowed_roles, status, chunk_count, uploaded_at"
         ),
         {"t": title, "f": filename, "u": uploaded_by, "r": roles, "c": len(chunks)},
     )).first()
 
-    for idx, (content, emb) in enumerate(zip(chunks, embeddings)):
+    for idx, (content, emb, roles) in enumerate(zip(chunks, embeddings, chunk_roles)):
         await db.execute(
             text(
-                "INSERT INTO chunks (document_id, chunk_index, content, embedding, allowed_roles) "
-                "VALUES (CAST(:d AS uuid), :i, :c, CAST(:e AS vector), :r)"
+                "INSERT INTO chunks (document_id, chunk_index, content, embedding, allowed_roles, roles_ai_suggested) "
+                "VALUES (CAST(:d AS uuid), :i, :c, CAST(:e AS vector), :r, true)"
             ),
             {"d": str(doc.id), "i": idx, "c": content, "e": _fmt_vec(emb), "r": roles},
         )
@@ -184,13 +188,14 @@ async def upload_document(
 
     chunks = _parse_and_chunk(filename, data)
     embeddings = await _embed_chunks(chunks)
+    chunk_roles = await nim_client.suggest_chunk_roles(chunks, roles)
 
     doc_title = title.strip() or filename
-    doc = await _persist_document(db, doc_title, filename, admin["id"], roles, chunks, embeddings)
+    doc = await _persist_document(db, doc_title, filename, admin["id"], roles, chunks, embeddings, chunk_roles)
 
     return DocumentOut(
         id=str(doc.id), title=doc.title, filename=doc.filename,
-        allowed_roles=list(doc.allowed_roles or []), chunk_count=doc.chunk_count,
+        allowed_roles=list(doc.allowed_roles or []), status=doc.status, chunk_count=doc.chunk_count,
         uploaded_at=doc.uploaded_at, uploaded_by_email=admin["email"],
     )
 
@@ -204,8 +209,8 @@ async def update_document_roles(doc_id: str, req: UpdateDocRolesRequest, admin: 
 
     row = (await db.execute(
         text(
-            "UPDATE documents SET allowed_roles = :r WHERE id = CAST(:i AS uuid) "
-            "RETURNING id, title, filename, allowed_roles, chunk_count, uploaded_at, uploaded_by"
+            "UPDATE documents SET allowed_roles = :r, status = 'pending_review' WHERE id = CAST(:i AS uuid) "
+            "RETURNING id, title, filename, allowed_roles, status, chunk_count, uploaded_at, uploaded_by"
         ),
         {"r": roles, "i": doc_id},
     )).first()
@@ -213,16 +218,118 @@ async def update_document_roles(doc_id: str, req: UpdateDocRolesRequest, admin: 
         raise HTTPException(status_code=404, detail="Document not found")
 
     await db.execute(
-        text("UPDATE chunks SET allowed_roles = :r WHERE document_id = CAST(:i AS uuid)"),
+        text("UPDATE chunks SET allowed_roles = :r, roles_ai_suggested = false WHERE document_id = CAST(:i AS uuid)"),
         {"r": roles, "i": doc_id},
     )
     await db.commit()
 
     return DocumentOut(
         id=str(row.id), title=row.title, filename=row.filename,
-        allowed_roles=list(row.allowed_roles or []), chunk_count=row.chunk_count,
+        allowed_roles=list(row.allowed_roles or []), status=row.status, chunk_count=row.chunk_count,
         uploaded_at=row.uploaded_at, uploaded_by_email=None,
     )
+
+
+@router.get("/documents/{doc_id}/chunks", response_model=list[ChunkOut])
+async def list_document_chunks(doc_id: str, admin: dict = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    """Return the admin-only review payload in document order."""
+    rows = (await db.execute(
+        text(
+            "SELECT id, chunk_index, content, allowed_roles, roles_ai_suggested FROM chunks "
+            "WHERE document_id = CAST(:i AS uuid) ORDER BY chunk_index"
+        ),
+        {"i": doc_id},
+    )).fetchall()
+    exists = await db.execute(text("SELECT 1 FROM documents WHERE id = CAST(:i AS uuid)"), {"i": doc_id})
+    if not exists.first():
+        raise HTTPException(status_code=404, detail="Document not found")
+    return [
+        ChunkOut(
+            id=str(row.id), chunk_index=row.chunk_index, content=row.content,
+            allowed_roles=list(row.allowed_roles or []), roles_ai_suggested=row.roles_ai_suggested,
+        )
+        for row in rows
+    ]
+
+
+@router.patch("/documents/{doc_id}/chunks/{chunk_id}", response_model=ChunkOut)
+async def update_chunk_roles(
+    doc_id: str,
+    chunk_id: int,
+    req: UpdateChunkRolesRequest,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Apply a reviewed tag set, enforcing the document-level access ceiling."""
+    candidate = (await db.execute(
+        text("SELECT allowed_roles FROM documents WHERE id = CAST(:i AS uuid)"), {"i": doc_id}
+    )).first()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Document not found")
+    roles = sorted(set(req.allowed_roles))
+    outside_ceiling = sorted(set(roles) - set(candidate.allowed_roles or []))
+    if outside_ceiling:
+        raise HTTPException(status_code=400, detail=f"Chunk roles exceed document roles: {outside_ceiling}")
+
+    row = (await db.execute(
+        text(
+            "UPDATE chunks SET allowed_roles = :r, roles_ai_suggested = false "
+            "WHERE id = :chunk_id AND document_id = CAST(:doc_id AS uuid) "
+            "RETURNING id, chunk_index, content, allowed_roles, roles_ai_suggested"
+        ),
+        {"r": roles, "chunk_id": chunk_id, "doc_id": doc_id},
+    )).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+    await db.commit()
+    return ChunkOut(
+        id=str(row.id), chunk_index=row.chunk_index, content=row.content,
+        allowed_roles=list(row.allowed_roles or []), roles_ai_suggested=row.roles_ai_suggested,
+    )
+
+
+@router.post("/documents/{doc_id}/publish", response_model=DocumentOut)
+async def publish_document(doc_id: str, admin: dict = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    row = (await db.execute(
+        text(
+            "UPDATE documents SET status = 'published' WHERE id = CAST(:i AS uuid) "
+            "RETURNING id, title, filename, allowed_roles, status, chunk_count, uploaded_at"
+        ),
+        {"i": doc_id},
+    )).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Document not found")
+    await db.commit()
+    return DocumentOut(
+        id=str(row.id), title=row.title, filename=row.filename,
+        allowed_roles=list(row.allowed_roles or []), status=row.status, chunk_count=row.chunk_count,
+        uploaded_at=row.uploaded_at, uploaded_by_email=None,
+    )
+
+
+@router.post("/documents/{doc_id}/reset-chunk-roles", response_model=list[ChunkOut])
+async def reset_chunk_roles(doc_id: str, admin: dict = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    candidate = (await db.execute(
+        text("SELECT allowed_roles FROM documents WHERE id = CAST(:i AS uuid)"), {"i": doc_id}
+    )).first()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Document not found")
+    rows = (await db.execute(
+        text(
+            "UPDATE chunks SET allowed_roles = :r, roles_ai_suggested = false "
+            "WHERE document_id = CAST(:i AS uuid) "
+            "RETURNING id, chunk_index, content, allowed_roles, roles_ai_suggested"
+        ),
+        {"r": list(candidate.allowed_roles or []), "i": doc_id},
+    )).fetchall()
+    await db.commit()
+    return [
+        ChunkOut(
+            id=str(row.id), chunk_index=row.chunk_index, content=row.content,
+            allowed_roles=list(row.allowed_roles or []), roles_ai_suggested=row.roles_ai_suggested,
+        )
+        for row in sorted(rows, key=lambda chunk: chunk.chunk_index)
+    ]
 
 
 @router.delete("/documents/{doc_id}")

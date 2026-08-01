@@ -63,8 +63,12 @@ export const ADMIN = {
   docUploadSubmit: 'admin-doc-upload-submit-button',
   docListRow: 'admin-doc-list-row',
   docListEditButton: 'admin-doc-list-edit-button',
+  docReviewButton: 'admin-doc-review-button',
   docListDeleteButton: 'admin-doc-list-delete-button',
   docEditRoleCheckbox: 'admin-doc-edit-role-checkbox',
   docEditSave: 'admin-doc-edit-save-button',
+  chunkRoleCheckbox: 'admin-chunk-role-checkbox',
+  chunkResetButton: 'admin-chunk-reset-button',
+  chunkSavePublishButton: 'admin-chunk-save-publish-button',
   backToChatButton: 'admin-back-to-chat-button',
 };

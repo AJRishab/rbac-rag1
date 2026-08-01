@@ -136,7 +136,7 @@ async def _retrieve_role_filtered(db: AsyncSession, q_vec: str, role: str):
             "SELECT c.id, c.document_id, c.chunk_index, c.content, c.allowed_roles, "
             "d.title AS doc_title, (c.embedding <=> CAST(:q AS vector)) AS distance "
             "FROM chunks c JOIN documents d ON d.id = c.document_id "
-            "WHERE c.allowed_roles && :r "
+            "WHERE d.status = 'published' AND c.allowed_roles && :r "
             "ORDER BY c.embedding <=> CAST(:q AS vector) LIMIT :k"
         ),
         {"q": q_vec, "r": [role], "k": TOP_K},
@@ -147,6 +147,7 @@ async def _retrieve_role_filtered(db: AsyncSession, q_vec: str, role: str):
             "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.allowed_roles, "
             "d.title AS doc_title "
             "FROM chunks c JOIN documents d ON d.id = c.document_id "
+            "WHERE d.status = 'published' "
             "ORDER BY c.embedding <=> CAST(:q AS vector) LIMIT :k"
         ),
         {"q": q_vec, "k": TOP_K},

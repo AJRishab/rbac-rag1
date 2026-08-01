@@ -12,10 +12,10 @@ export const ROLES = ['employee', 'manager', 'hr', 'admin'];
 const FILE_ACCEPT = '.txt,.md,.markdown,.pdf,.docx';
 const FILE_EXT_RE = /\.(txt|md|markdown|pdf|docx)$/i;
 
-function RoleChecklist({ roles, onToggle, testId }) {
+function RoleChecklist({ roles, onToggle, testId, availableRoles = ROLES }) {
   return (
     <div className="grid grid-cols-1 min-[380px]:grid-cols-2 sm:grid-cols-4 gap-2">
-      {ROLES.map((r) => (
+      {availableRoles.map((r) => (
         <label key={r} className={cn(
           'flex items-center gap-2 rounded-lg border px-3 py-2.5 sm:py-2 cursor-pointer transition-colors touch-manipulation',
           roles[r] ? 'border-cyan-400/40 bg-cyan-500/8' : 'border-white/10 bg-white/[0.02] hover:bg-white/[0.04]',

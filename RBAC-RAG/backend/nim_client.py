@@ -6,6 +6,7 @@ Core design:
 """
 import os
 import asyncio
+import json
 import logging
 from pathlib import Path
 import httpx
@@ -182,3 +183,84 @@ async def chat(system: str, user: str, max_tokens: int = 700, temperature: float
         },
     )
     return data["choices"][0]["message"]["content"]
+
+
+def _parse_role_suggestions(response: str, expected_count: int, candidate_roles: list[str]) -> list[list[str] | None]:
+    """Parse a model response without allowing it to expand the role ceiling.
+
+    ``None`` means that chunk must use the caller's fail-safe default.
+    """
+    suggestions: list[list[str] | None] = [None] * expected_count
+    try:
+        payload = json.loads(response)
+        items = payload["chunk_roles"]
+        if not isinstance(items, list):
+            return suggestions
+        seen: set[int] = set()
+        allowed = set(candidate_roles)
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            index, roles = item.get("index"), item.get("roles")
+            if not isinstance(index, int) or index < 0 or index >= expected_count or index in seen:
+                continue
+            seen.add(index)
+            if not isinstance(roles, list) or not roles or any(not isinstance(role, str) for role in roles):
+                continue
+            normalized = sorted(set(roles))
+            if any(role not in allowed for role in normalized):
+                continue
+            suggestions[index] = normalized
+    except (json.JSONDecodeError, KeyError, TypeError):
+        logger.warning("NIM returned malformed chunk-role suggestions; using document defaults")
+    return suggestions
+
+
+async def suggest_chunk_roles(chunks: list[str], candidate_roles: list[str]) -> list[list[str]]:
+    """Suggest a permitted role subset per chunk, with a safe per-chunk fallback.
+
+    The model is deliberately called in bounded batches, never once per chunk. A
+    failure or invalid item falls back to the document's candidate roles so upload
+    remains available and no model output can grant additional access.
+    """
+    defaults = sorted(set(candidate_roles))
+    if not chunks or not defaults:
+        return [defaults.copy() for _ in chunks]
+
+    # Around 500 tokens per chunk are produced by ingestion. Keep prompts well
+    # below common instruction-model context limits while retaining batch calls.
+    max_chars = int(os.environ.get("NIM_CHUNK_ROLE_BATCH_CHARS", "24000"))
+    batches: list[list[str]] = []
+    batch: list[str] = []
+    size = 0
+    for chunk in chunks:
+        chunk_size = len(chunk) + 32
+        if batch and size + chunk_size > max_chars:
+            batches.append(batch)
+            batch, size = [], 0
+        batch.append(chunk)
+        size += chunk_size
+    if batch:
+        batches.append(batch)
+
+    all_roles: list[list[str]] = []
+    system = (
+        "You assign document-access roles for RAG chunks. Return JSON only, with no markdown. "
+        "Choose a non-empty subset of the candidate roles for every chunk. Use all candidate roles "
+        "unless a chunk is clearly more sensitive (for example named pay, health, discipline, or legal details). "
+        "Never invent roles or omit an index."
+    )
+    for batch in batches:
+        numbered = "\n\n".join(f"[{index}] {chunk}" for index, chunk in enumerate(batch))
+        prompt = (
+            f"Candidate roles: {json.dumps(defaults)}\n\nChunks:\n{numbered}\n\n"
+            "Return exactly {\"chunk_roles\":[{\"index\":0,\"roles\":[\"role\"]}]} for every index."
+        )
+        try:
+            response = await chat(system, prompt, max_tokens=max(300, len(batch) * 40), temperature=0)
+            parsed = _parse_role_suggestions(response, len(batch), defaults)
+        except Exception as exc:  # Upload must not be blocked by advisory tagging.
+            logger.warning("Chunk role suggestion failed; using document defaults: %s", type(exc).__name__)
+            parsed = [None] * len(batch)
+        all_roles.extend(item if item is not None else defaults.copy() for item in parsed)
+    return all_roles
