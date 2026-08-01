@@ -65,12 +65,14 @@ SCHEMA_SQL = [
         content text NOT NULL,
         embedding vector(1024) NOT NULL,
         allowed_roles text[] NOT NULL DEFAULT ARRAY[]::text[],
-        roles_ai_suggested boolean NOT NULL DEFAULT true
+        roles_ai_suggested boolean NOT NULL DEFAULT true,
+        source_page int
     )""",
 
     # Idempotent upgrades for databases created before chunk-level review.
     "ALTER TABLE documents ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'pending_review'",
     "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS roles_ai_suggested boolean NOT NULL DEFAULT true",
+    "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS source_page int",
 
     "CREATE INDEX IF NOT EXISTS chunks_roles_gin ON chunks USING GIN (allowed_roles)",
     "CREATE INDEX IF NOT EXISTS chunks_document_id_idx ON chunks (document_id)",

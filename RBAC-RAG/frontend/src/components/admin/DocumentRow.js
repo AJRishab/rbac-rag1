@@ -121,7 +121,9 @@ function ChunkReviewDialog({ doc, open, onOpenChange, onSaved }) {
           {loading ? <div className="py-8 text-sm text-slate-500 font-mono">Loading chunks…</div> : chunks.map((chunk) => (
             <section key={chunk.id} className="rounded-lg border border-white/10 bg-black/20 p-3 space-y-3">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="mono-label text-slate-400">chunk {chunk.chunk_index + 1}</span>
+                <span className="mono-label text-slate-400">
+                  {chunk.source || doc.filename} · {chunk.page != null ? `p. ${chunk.page} · ` : ''}chunk ID {chunk.id}
+                </span>
                 {chunk.roles_ai_suggested && (
                   <span className="inline-flex items-center gap-1 rounded-full border border-violet-400/25 bg-violet-500/10 px-2 py-0.5 text-[10px] font-mono text-violet-200">
                     <Sparkles className="w-3 h-3" /> AI-suggested

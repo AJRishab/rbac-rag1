@@ -12,6 +12,18 @@ function rowKey(prefix, r, i) {
   return `${prefix}:${docId}:${idx}`;
 }
 
+function sourceLabel(item) {
+  return item.source || item.title || 'Unknown source';
+}
+
+function chunkMetadata(item) {
+  const parts = [];
+  if (item.page != null) parts.push(`p. ${item.page}`);
+  if (item.chunk_id != null) parts.push(`chunk ID ${item.chunk_id}`);
+  else if (item.chunk_index != null) parts.push(`chunk ${item.chunk_index}`);
+  return parts.join(' · ');
+}
+
 export function RetrievalDetailPanel({ message }) {
   const [open, setOpen] = useState(false);
   const detail = message.retrieval_detail || {};
@@ -80,9 +92,9 @@ export function RetrievalDetailPanel({ message }) {
                   >
                     <span className="font-mono text-[10px] text-emerald-300 mt-0.5 shrink-0">#{i + 1}</span>
                     <div className="min-w-0 flex-1">
-                      <div className="text-xs text-slate-200 truncate">{r.title}</div>
+                      <div className="text-xs text-slate-200 truncate">{sourceLabel(r)}</div>
                       <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] font-mono text-slate-500">
-                        <span>chunk {r.chunk_index ?? '-'}</span>
+                        <span>{chunkMetadata(r)}</span>
                         {typeof r.distance === 'number' && (
                           <span title="cosine distance">d={r.distance.toFixed(3)}</span>
                         )}
@@ -113,9 +125,9 @@ export function RetrievalDetailPanel({ message }) {
                   >
                     <FileWarning className="w-3 h-3 text-red-300 mt-0.5 shrink-0" strokeWidth={1.75} />
                     <div className="min-w-0 flex-1">
-                      <div className="text-xs text-slate-200 truncate">{b.title}</div>
+                      <div className="text-xs text-slate-200 truncate">{sourceLabel(b)}</div>
                       <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] font-mono text-slate-500">
-                        <span>chunk {b.chunk_index ?? '-'}</span>
+                        <span>{chunkMetadata(b)}</span>
                         <span className="text-red-300/80">role mismatch</span>
                       </div>
                     </div>

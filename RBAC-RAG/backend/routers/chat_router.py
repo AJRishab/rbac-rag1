@@ -119,8 +119,8 @@ async def _insert_user_message(db: AsyncSession, conv_id: str, question: str):
 async def _retrieve_admin(db: AsyncSession, q_vec: str):
     rows = (await db.execute(
         text(
-            "SELECT c.id, c.document_id, c.chunk_index, c.content, c.allowed_roles, "
-            "d.title AS doc_title, (c.embedding <=> CAST(:q AS vector)) AS distance "
+            "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.content, c.allowed_roles, "
+            "d.title AS doc_title, d.filename AS source, (c.embedding <=> CAST(:q AS vector)) AS distance "
             "FROM chunks c JOIN documents d ON d.id = c.document_id "
             "ORDER BY c.embedding <=> CAST(:q AS vector) LIMIT :k"
         ),
@@ -133,8 +133,8 @@ async def _retrieve_role_filtered(db: AsyncSession, q_vec: str, role: str):
     """RBAC-filtered retrieval with the role check INSIDE the SQL query."""
     rows = (await db.execute(
         text(
-            "SELECT c.id, c.document_id, c.chunk_index, c.content, c.allowed_roles, "
-            "d.title AS doc_title, (c.embedding <=> CAST(:q AS vector)) AS distance "
+            "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.content, c.allowed_roles, "
+            "d.title AS doc_title, d.filename AS source, (c.embedding <=> CAST(:q AS vector)) AS distance "
             "FROM chunks c JOIN documents d ON d.id = c.document_id "
             "WHERE d.status = 'published' AND c.allowed_roles && :r "
             "ORDER BY c.embedding <=> CAST(:q AS vector) LIMIT :k"
@@ -144,19 +144,22 @@ async def _retrieve_role_filtered(db: AsyncSession, q_vec: str, role: str):
 
     unfiltered = (await db.execute(
         text(
-            "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.allowed_roles, "
-            "d.title AS doc_title "
+            "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.allowed_roles, "
+            "d.title AS doc_title, d.filename AS source "
             "FROM chunks c JOIN documents d ON d.id = c.document_id "
             "WHERE d.status = 'published' "
             "ORDER BY c.embedding <=> CAST(:q AS vector) LIMIT :k"
         ),
         {"q": q_vec, "k": TOP_K},
     )).fetchall()
-    kept_ids = {r.id for r in rows}
+    kept_ids = {r.chunk_id for r in rows}
     blocked = [
         {
             "document_id": str(r.document_id),
             "title": r.doc_title,
+            "source": r.source,
+            "page": r.source_page,
+            "chunk_id": r.chunk_id,
             "chunk_index": r.chunk_index,
             "allowed_roles": list(r.allowed_roles or []),
             "reason": "role_mismatch",
@@ -175,10 +178,16 @@ def _build_citations_and_details(rows):
         title = r.doc_title
         if title not in seen_titles:
             seen_titles.add(title)
-            citations.append({"document_id": str(r.document_id), "title": title, "chunk_index": r.chunk_index})
+            citations.append({
+                "document_id": str(r.document_id), "title": title, "source": r.source,
+                "page": r.source_page, "chunk_id": r.chunk_id, "chunk_index": r.chunk_index,
+            })
         retrieved_details.append({
             "document_id": str(r.document_id),
             "title": title,
+            "source": r.source,
+            "page": r.source_page,
+            "chunk_id": r.chunk_id,
             "chunk_index": r.chunk_index,
             "allowed_roles": list(r.allowed_roles or []),
             "distance": float(r.distance),
@@ -193,11 +202,15 @@ async def _generate_answer(rows, question: str, admin_bypass: bool) -> str:
             if admin_bypass
             else "I don't have documents that your role is allowed to see for this question."
         )
-    context = "\n\n".join(f"[Source #{i+1}: {r.doc_title}]\n{r.content}" for i, r in enumerate(rows))
+    context = "\n\n".join(
+        f"[Source #{i + 1}: {r.source}; page {r.source_page or 'unknown'}; chunk {r.chunk_id}]\n{r.content}"
+        for i, r in enumerate(rows)
+    )
     system_prompt = (
         "You are SENTRY/RAG, a permission-aware assistant. Answer the user's question "
-        "using ONLY the sources provided below. Cite the specific source titles in your answer "
-        "in the format (Source: Title). If the sources don't contain the answer, respond exactly: "
+        "using ONLY the sources provided below. Cite sources as (Source: filename, page N, chunk ID) "
+        "when page metadata is available, otherwise use (Source: filename, chunk ID). "
+        "If the sources don't contain the answer, respond exactly: "
         "'I don't have documents that answer this question.' Do not use general knowledge. "
         "Do not make up sources."
     )

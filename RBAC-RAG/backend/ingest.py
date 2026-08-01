@@ -1,6 +1,6 @@
 """File parsing + chunking utilities.
 
-- Parse TXT/MD/PDF/DOCX -> plain text
+- Parse TXT/MD/PDF/DOCX -> plain text, preserving PDF page provenance
 - Chunk into ~500-token windows with 50-token overlap using tiktoken
 """
 import io
@@ -23,7 +23,7 @@ def parse_txt(data: bytes) -> str:
     return data.decode("utf-8", errors="ignore")
 
 
-def parse_pdf(data: bytes) -> str:
+def parse_pdf_pages(data: bytes) -> list[str]:
     from pypdf import PdfReader
     reader = PdfReader(io.BytesIO(data))
     pages = []
@@ -32,7 +32,12 @@ def parse_pdf(data: bytes) -> str:
             pages.append(p.extract_text() or "")
         except Exception:
             pages.append("")
-    return "\n\n".join(pages)
+    return pages
+
+
+def parse_pdf(data: bytes) -> str:
+    """Legacy plain-text PDF parser retained for callers outside ingestion."""
+    return "\n\n".join(parse_pdf_pages(data))
 
 
 def parse_docx(data: bytes) -> str:
@@ -59,6 +64,13 @@ def parse_file(filename: str, data: bytes) -> str:
     if lower.endswith(".txt") or lower.endswith(".md") or lower.endswith(".markdown"):
         return parse_txt(data)
     raise ValueError(f"Unsupported file type: {filename}")
+
+
+def parse_file_pages(filename: str, data: bytes) -> list[tuple[str, int | None]]:
+    """Return source text alongside a one-based PDF page when it exists."""
+    if filename.lower().endswith(".pdf"):
+        return [(page, index + 1) for index, page in enumerate(parse_pdf_pages(data)) if page.strip()]
+    return [(parse_file(filename, data), None)]
 
 
 def _clean_text(text: str) -> str:
@@ -91,4 +103,16 @@ def chunk_text(text: str, chunk_tokens: int = 500, overlap_tokens: int = 50) -> 
             chunks.append(chunk)
         if start + chunk_tokens >= len(tokens):
             break
+    return chunks
+
+
+def chunk_file(filename: str, data: bytes, chunk_tokens: int = 500, overlap_tokens: int = 50) -> list[tuple[str, int | None]]:
+    """Chunk a file while retaining page metadata for PDF-derived chunks.
+
+    PDF chunks intentionally never span pages; for other input formats the page
+    is unknown and stored as ``None``.
+    """
+    chunks: list[tuple[str, int | None]] = []
+    for text, page in parse_file_pages(filename, data):
+        chunks.extend((chunk, page) for chunk in chunk_text(text, chunk_tokens, overlap_tokens))
     return chunks

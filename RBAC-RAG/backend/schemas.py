@@ -89,6 +89,8 @@ class ChunkOut(BaseModel):
     content: str
     allowed_roles: list[str]
     roles_ai_suggested: bool
+    source: str | None = None
+    page: int | None = None
 
 
 class UpdateChunkRolesRequest(BaseModel):
