@@ -101,7 +101,7 @@
   - Non-admin cannot access `/admin` even via URL; redirects to `/chat`
 
 #### 2.4 Phase 2 testing ✅
-- testing_agent_v3 results:
+- regression test results:
   - **Backend**: 100% (15/15)
   - **Frontend**: 95% (18/19)
   - Only noted issue: “JWT expiry during extended automated runs” (expected; tokens are time-bound)

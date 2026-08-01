@@ -35,7 +35,7 @@
   },
   "design_tokens": {
     "css_custom_properties": {
-      "notes": "Implement by overriding shadcn tokens in /app/frontend/src/index.css under .dark. Keep base near deep navy/charcoal (not pure black) for legibility.",
+      "notes": "Implement by overriding shadcn tokens in frontend/src/index.css under .dark. Keep base near deep navy/charcoal (not pure black) for legibility.",
       "colors": {
         "--background": "215 28% 7%  /* #0B1220 deep navy */",
         "--foreground": "210 20% 96%  /* #F1F5F9 */",
@@ -185,22 +185,22 @@
   "components": {
     "component_path": {
       "shadcn": {
-        "Button": "/app/frontend/src/components/ui/button.jsx",
-        "Input": "/app/frontend/src/components/ui/input.jsx",
-        "Textarea": "/app/frontend/src/components/ui/textarea.jsx",
-        "Card": "/app/frontend/src/components/ui/card.jsx",
-        "Badge": "/app/frontend/src/components/ui/badge.jsx",
-        "Tabs": "/app/frontend/src/components/ui/tabs.jsx",
-        "Table": "/app/frontend/src/components/ui/table.jsx",
-        "Dialog": "/app/frontend/src/components/ui/dialog.jsx",
-        "Sheet": "/app/frontend/src/components/ui/sheet.jsx",
-        "Select": "/app/frontend/src/components/ui/select.jsx",
-        "Checkbox": "/app/frontend/src/components/ui/checkbox.jsx",
-        "ScrollArea": "/app/frontend/src/components/ui/scroll-area.jsx",
-        "Separator": "/app/frontend/src/components/ui/separator.jsx",
-        "Collapsible": "/app/frontend/src/components/ui/collapsible.jsx",
-        "Tooltip": "/app/frontend/src/components/ui/tooltip.jsx",
-        "Sonner": "/app/frontend/src/components/ui/sonner.jsx"
+        "Button": "frontend/src/components/ui/button.jsx",
+        "Input": "frontend/src/components/ui/input.jsx",
+        "Textarea": "frontend/src/components/ui/textarea.jsx",
+        "Card": "frontend/src/components/ui/card.jsx",
+        "Badge": "frontend/src/components/ui/badge.jsx",
+        "Tabs": "frontend/src/components/ui/tabs.jsx",
+        "Table": "frontend/src/components/ui/table.jsx",
+        "Dialog": "frontend/src/components/ui/dialog.jsx",
+        "Sheet": "frontend/src/components/ui/sheet.jsx",
+        "Select": "frontend/src/components/ui/select.jsx",
+        "Checkbox": "frontend/src/components/ui/checkbox.jsx",
+        "ScrollArea": "frontend/src/components/ui/scroll-area.jsx",
+        "Separator": "frontend/src/components/ui/separator.jsx",
+        "Collapsible": "frontend/src/components/ui/collapsible.jsx",
+        "Tooltip": "frontend/src/components/ui/tooltip.jsx",
+        "Sonner": "frontend/src/components/ui/sonner.jsx"
       }
     },
     "patterns": {
@@ -441,21 +441,5 @@
     ],
     "reduced_motion": "Disable particles/parallax and reduce animation durations when prefers-reduced-motion is set."
   },
-  "instructions_to_main_agent": {
-    "implementation_priorities": [
-      "1) Override shadcn dark tokens in /frontend/src/index.css to match palette above (deep navy base + cyan accent).",
-      "2) Build app-shell background with grid + scanline overlays (CSS only) and keep gradients confined to hero.",
-      "3) Treat retrieval-detail panel as a first-class component using shadcn Collapsible + Badge + ScrollArea.",
-      "4) Ensure every interactive element and key info has data-testid.",
-      "5) Use sonner toasts for rate limit and errors; keep copy operator-friendly."
-    ],
-    "do_not": [
-      "Do not introduce light mode.",
-      "Do not use purple accents.",
-      "Do not use transition: all.",
-      "Do not center-align entire app container.",
-      "Do not apply gradients to reading areas or small UI elements."
-    ]
-  },
-  "appendix_general_ui_ux_design_guidelines": "<General UI UX Design Guidelines>\n    - You must **not** apply universal transition. Eg: `transition: all`. This results in breaking transforms. Always add transitions for specific interactive elements like button, input excluding transforms\n    - You must **not** center align the app container, ie do not add `.App { text-align: center; }` in the css file. This disrupts the human natural reading flow of text\n   - NEVER: use AI assistant Emoji characters like`🤖🧠💭💡🔮🎯📚🎭🎬🎪🎉🎊🎁🎀🎂🍰🎈🎨🎰💰💵💳🏦💎🪙💸🤑📊📈📉💹🔢🏆🥇 etc for icons. Always use **FontAwesome cdn** or **lucid-react** library already installed in the package.json\n\n **GRADIENT RESTRICTION RULE**\nNEVER use dark/saturated gradient combos (e.g., purple/pink) on any UI element.  Prohibited gradients: blue-500 to purple 600, purple 500 to pink-500, green-500 to blue-500, red to pink etc\nNEVER use dark gradients for logo, testimonial, footer etc\nNEVER let gradients cover more than 20% of the viewport.\nNEVER apply gradients to text-heavy content or reading areas.\nNEVER use gradients on small UI elements (<100px width).\nNEVER stack multiple gradient layers in the same viewport.\n\n**ENFORCEMENT RULE:**\n    • Id gradient area exceeds 20% of viewport OR affects readability, **THEN** use solid colors\n\n**How and where to use:**\n   • Section backgrounds (not content backgrounds)\n   • Hero section header content. Eg: dark to light to dark color\n   • Decorative overlays and accent elements only\n   • Hero section with 2-3 mild color\n   • Gradients creation can be done for any angle say horizontal, vertical or diagonal\n\n- For AI chat, voice application, **do not use purple color. Use color like light green, ocean blue, peach orange etc**\n\n</Font Guidelines>\n\n- Every interaction needs micro-animations - hover states, transitions, parallax effects, and entrance animations. Static = dead. \n   \n- Use 2-3x more spacing than feels comfortable. Cramped designs look cheap.\n\n- Subtle grain textures, noise overlays, custom cursors, selection states, and loading animations: separates good from extraordinary.\n   \n- Before generating UI, infer the visual style from the problem statement (palette, contrast, mood, motion) and immediately instantiate it by setting global design tokens (primary, secondary/accent, background, foreground, ring, state colors), rather than relying on any library defaults. Don't make the background dark as a default step, always understand problem first and define colors accordingly\n    Eg: - if it implies playful/energetic, choose a colorful scheme\n           - if it implies monochrome/minimal, choose a black–white/neutral scheme\n\n**Component Reuse:**\n\t- Prioritize using pre-existing components from src/components/ui when applicable\n\t- Create new components that match the style and conventions of existing components when needed\n\t- Examine existing components to understand the project's component patterns before creating new ones\n\n**IMPORTANT**: Do not use HTML based component like dropdown, calendar, toast etc. You **MUST** always use `/app/frontend/src/components/ui/ ` only as a primary components as these are modern and stylish component\n\n**Best Practices:**\n\t- Use Shadcn/UI as the primary component library for consistency and accessibility\n\t- Import path: ./components/[component-name]\n\n**Export Conventions:**\n\t- Components MUST use named exports (export const ComponentName = ...)\n\t- Pages MUST use default exports (export default function PageName() {...})\n\n**Toasts:**\n  - Use `sonner` for toasts\"\n  - Sonner component are located in `/app/src/components/ui/sonner.tsx`\n\nUse 2–4 color gradients, subtle textures/noise overlays, or CSS-based noise to avoid flat visuals.\n</General UI UX Design Guidelines>"
+  "appendix_general_ui_ux_design_guidelines": "<General UI UX Design Guidelines>\n    - You must **not** apply universal transition. Eg: `transition: all`. This results in breaking transforms. Always add transitions for specific interactive elements like button, input excluding transforms\n    - You must **not** center align the app container, ie do not add `.App { text-align: center; }` in the css file. This disrupts the human natural reading flow of text\n   - NEVER: use AI assistant Emoji characters like`🤖🧠💭💡🔮🎯📚🎭🎬🎪🎉🎊🎁🎀🎂🍰🎈🎨🎰💰💵💳🏦💎🪙💸🤑📊📈📉💹🔢🏆🥇 etc for icons. Always use **FontAwesome cdn** or **lucid-react** library already installed in the package.json\n\n **GRADIENT RESTRICTION RULE**\nNEVER use dark/saturated gradient combos (e.g., purple/pink) on any UI element.  Prohibited gradients: blue-500 to purple 600, purple 500 to pink-500, green-500 to blue-500, red to pink etc\nNEVER use dark gradients for logo, testimonial, footer etc\nNEVER let gradients cover more than 20% of the viewport.\nNEVER apply gradients to text-heavy content or reading areas.\nNEVER use gradients on small UI elements (<100px width).\nNEVER stack multiple gradient layers in the same viewport.\n\n**ENFORCEMENT RULE:**\n    • Id gradient area exceeds 20% of viewport OR affects readability, **THEN** use solid colors\n\n**How and where to use:**\n   • Section backgrounds (not content backgrounds)\n   • Hero section header content. Eg: dark to light to dark color\n   • Decorative overlays and accent elements only\n   • Hero section with 2-3 mild color\n   • Gradients creation can be done for any angle say horizontal, vertical or diagonal\n\n- For AI chat, voice application, **do not use purple color. Use color like light green, ocean blue, peach orange etc**\n\n</Font Guidelines>\n\n- Every interaction needs micro-animations - hover states, transitions, parallax effects, and entrance animations. Static = dead. \n   \n- Use 2-3x more spacing than feels comfortable. Cramped designs look cheap.\n\n- Subtle grain textures, noise overlays, custom cursors, selection states, and loading animations: separates good from extraordinary.\n   \n- Before generating UI, infer the visual style from the problem statement (palette, contrast, mood, motion) and immediately instantiate it by setting global design tokens (primary, secondary/accent, background, foreground, ring, state colors), rather than relying on any library defaults. Don't make the background dark as a default step, always understand problem first and define colors accordingly\n    Eg: - if it implies playful/energetic, choose a colorful scheme\n           - if it implies monochrome/minimal, choose a black–white/neutral scheme\n\n**Component Reuse:**\n\t- Prioritize using pre-existing components from src/components/ui when applicable\n\t- Create new components that match the style and conventions of existing components when needed\n\t- Examine existing components to understand the project's component patterns before creating new ones\n\n**IMPORTANT**: Do not use HTML based component like dropdown, calendar, toast etc. You **MUST** always use `frontend/src/components/ui/ ` only as a primary components as these are modern and stylish component\n\n**Best Practices:**\n\t- Use Shadcn/UI as the primary component library for consistency and accessibility\n\t- Import path: ./components/[component-name]\n\n**Export Conventions:**\n\t- Components MUST use named exports (export const ComponentName = ...)\n\t- Pages MUST use default exports (export default function PageName() {...})\n\n**Toasts:**\n  - Use `sonner` for toasts\"\n  - Sonner component are located in `frontend/src/components/ui/sonner.tsx`\n\nUse 2–4 color gradients, subtle textures/noise overlays, or CSS-based noise to avoid flat visuals.\n</General UI UX Design Guidelines>"
 }

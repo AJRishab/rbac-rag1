@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import datetime
 
-BASE_URL = "https://permission-rag.preview.emergentagent.com/api"
+BASE_URL = "http://localhost:7860/api"
 
 class SentryRAGTester:
     def __init__(self):
