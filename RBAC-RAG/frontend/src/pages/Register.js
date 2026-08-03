@@ -25,8 +25,8 @@ export default function Register() {
     setSubmitting(true);
     try {
       await register(email.trim(), password);
-      toast.success('Account created — awaiting admin approval');
-      navigate('/pending', { replace: true, state: { email: email.trim() } });
+      toast.success('Account created — check your email to verify it');
+      navigate('/verify-email', { replace: true, state: { email: email.trim() } });
     } catch (err) {
       const msg = err?.message || err?.response?.data?.detail || 'Registration failed';
       setError(msg);

@@ -28,7 +28,16 @@ export default function Login() {
       const to = location.state?.from?.pathname || '/chat';
       navigate(to, { replace: true });
     } catch (err) {
-      const msg = err?.error_description || err?.message || err?.response?.data?.detail || 'Login failed';
+      const raw = err?.error_description || err?.message || err?.response?.data?.detail || '';
+      const lower = typeof raw === 'string' ? raw.toLowerCase() : '';
+      const needsVerify =
+        err?.code === 'email_not_confirmed' ||
+        lower.includes('email not confirmed') ||
+        lower.includes('confirm your email') ||
+        lower.includes('email_not_confirmed');
+      const msg = needsVerify
+        ? 'Please verify your email before signing in.'
+        : (typeof raw === 'string' && raw) || 'Login failed';
       const display = typeof msg === 'string' ? msg : 'Login failed';
       setError(display);
       toast.error(display);
