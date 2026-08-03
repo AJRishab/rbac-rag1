@@ -10,13 +10,14 @@ jwks_client = PyJWKClient(
 
 
 def verify_supabase_token(token: str) -> dict:
+    header = jwt.get_unverified_header(token)
+    print("JWT header:", header)
+
     signing_key = jwks_client.get_signing_key_from_jwt(token)
 
-    payload = jwt.decode(
+    return jwt.decode(
         token,
         signing_key.key,
-        algorithms=["ES256"],
+        algorithms=["ES256", "RS256"],
         options={"verify_aud": False},
     )
-
-    return payload
