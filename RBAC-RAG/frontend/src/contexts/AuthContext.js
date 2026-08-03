@@ -62,7 +62,13 @@ export function AuthProvider({ children }) {
   }, [refreshMe]);
 
   const register = useCallback(async (email, password) => {
-    const { error } = await supabase.auth.signUp({ email, password });
+    const { error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        emailRedirectTo: "https://rbac-rag-nine.vercel.app/auth/callback",
+      },
+    });
     if (error) throw error;
     return { ok: true, email };
   }, []);
