@@ -10,7 +10,7 @@ export default function Landing() {
   return (
     <div className="landing-shell min-h-screen text-slate-100">
       {/* NAV */}
-      <nav className="sticky top-0 z-30 backdrop-blur-md bg-[hsl(var(--background))]/60 border-b border-white/8">
+      <nav className="sticky z-30 backdrop-blur-md bg-[hsl(var(--background))]/60 border-b border-white/8" style={{ top: 'var(--safe-top)' }}>
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 h-14 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2">
             <div className="w-7 h-7 rounded-md bg-cyan-500/15 border border-cyan-400/30 flex items-center justify-center">

@@ -1,0 +1,8 @@
+{
+  "appId": "com.ajrishab.sentryrag",
+  "appName": "Sentry RAG",
+  "webDir": "build",
+  "server": {
+    "androidScheme": "https"
+  }
+}

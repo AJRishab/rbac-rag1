@@ -19,7 +19,7 @@ export default function Admin() {
 
   return (
     <div className="app-shell text-slate-100 overflow-x-hidden">
-      <div className="sticky top-0 z-20 h-14 border-b border-white/8 backdrop-blur-md bg-[hsl(var(--background))]/80 flex items-center justify-between gap-2 px-2 sm:px-6">
+      <div className="sticky z-20 h-14 border-b border-white/8 backdrop-blur-md bg-[hsl(var(--background))]/80 flex items-center justify-between gap-2 px-2 sm:px-6" style={{ top: 'var(--safe-top)' }}>
         <div className="flex items-center gap-1.5 sm:gap-3 min-w-0">
           <Button
             data-testid={ADMIN.backToChatButton}
@@ -59,7 +59,7 @@ export default function Admin() {
         </div>
       </div>
 
-      <div className="max-w-6xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-6 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
+      <div className="max-w-6xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-6 pb-[max(1.5rem,var(--safe-bottom))]">
         <Tabs value={tab} onValueChange={setTab} className="space-y-4 sm:space-y-6">
           <TabsList className="bg-black/30 border border-white/10 p-1 w-full sm:w-auto grid grid-cols-2 sm:inline-flex h-auto">
             <TabsTrigger

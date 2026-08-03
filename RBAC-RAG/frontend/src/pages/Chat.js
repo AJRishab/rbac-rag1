@@ -242,7 +242,7 @@ export default function Chat() {
             </div>
           </div>
 
-          <div className="shrink-0 border-t border-white/8 bg-[hsl(var(--background))]/70 backdrop-blur-md px-2 sm:px-6 py-2.5 sm:py-3 pb-[max(0.625rem,env(safe-area-inset-bottom))]">
+          <div className="shrink-0 border-t border-white/8 bg-[hsl(var(--background))]/70 backdrop-blur-md px-2 sm:px-6 py-2.5 sm:py-3 pb-[max(0.625rem,var(--safe-bottom))]">
             <div className="max-w-4xl mx-auto">
               <div className="panel-inset flex items-end gap-2 p-1.5 sm:p-2">
                 <Textarea
