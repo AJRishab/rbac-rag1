@@ -1,46 +1,11 @@
 """Pydantic schemas for API requests/responses."""
-import re
 from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
 
+
 RoleType = Literal["employee", "manager", "hr", "admin"]
 StatusType = Literal["pending", "approved"]
-
-# Permissive email regex — accepts .local etc. for dev/internal use
-EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
-
-
-def _validate_email(v: str) -> str:
-    v = v.strip().lower()
-    if not EMAIL_RE.match(v):
-        raise ValueError("Invalid email address")
-    return v
-
-
-class RegisterRequest(BaseModel):
-    email: str
-    password: str = Field(min_length=8, max_length=200)
-
-    @field_validator("email")
-    @classmethod
-    def _v_email(cls, v: str) -> str:
-        return _validate_email(v)
-
-
-class LoginRequest(BaseModel):
-    email: str
-    password: str
-
-    @field_validator("email")
-    @classmethod
-    def _v_email(cls, v: str) -> str:
-        return _validate_email(v)
-
-
-class ChangePasswordRequest(BaseModel):
-    current_password: str
-    new_password: str = Field(min_length=8, max_length=200)
 
 
 class UserOut(BaseModel):
@@ -50,11 +15,6 @@ class UserOut(BaseModel):
     status: str
     must_change_password: bool
     created_at: datetime | None = None
-
-
-class AuthResponse(BaseModel):
-    token: str
-    user: UserOut
 
 
 class ApproveUserRequest(BaseModel):

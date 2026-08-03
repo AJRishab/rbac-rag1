@@ -2,12 +2,17 @@
 Sentry RAG - Backend API Tests
 Tests all critical endpoints including auth, admin, and RBAC-filtered chat.
 """
+import os
 import requests
 import sys
 import time
 from datetime import datetime
 
 BASE_URL = "http://localhost:7860/api"
+
+# Supabase connection for obtaining access tokens (login / signup).
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 
 class SentryRAGTester:
     def __init__(self):
@@ -45,52 +50,55 @@ class SentryRAGTester:
             return False
 
     def test_login(self, email, password, expected_status=200):
-        """Test login endpoint"""
+        """Sign in via Supabase Auth and return the access token.
+
+        Login is no longer a backend endpoint — supabase-js (or this REST call)
+        exchanges email+password for a Supabase JWT, which the backend verifies.
+        """
         try:
             response = requests.post(
-                f"{self.base_url}/auth/login",
+                f"{SUPABASE_URL}/auth/v1/token",
+                params={"grant_type": "password"},
+                headers={"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"},
                 json={"email": email, "password": password},
                 timeout=10
             )
             passed = response.status_code == expected_status
-            
+
             if passed and response.status_code == 200:
                 data = response.json()
-                if "token" in data:
-                    self.tokens[email] = data["token"]
-                    user_role = data.get("user", {}).get("role", "N/A")
-                    self.log_test(f"Login as {email}", True, f"Token received, role: {user_role}")
+                token = data.get("access_token")
+                if token:
+                    self.tokens[email] = token
+                    self.log_test(f"Login as {email}", True, "Supabase access token received")
                 else:
-                    self.log_test(f"Login as {email}", False, "No token in response")
+                    self.log_test(f"Login as {email}", False, "No access_token in response")
                     passed = False
             else:
-                self.log_test(f"Login as {email}", passed, f"Status: {response.status_code}")
-            
+                self.log_test(f"Login as {email}", passed, f"Status: {response.status_code}, Body: {response.text[:200]}")
+
             return passed
         except Exception as e:
             self.log_test(f"Login as {email}", False, f"Error: {str(e)}")
             return False
 
     def test_register(self, email, password):
-        """Test registration endpoint"""
+        """Sign up a new user via Supabase Auth."""
         try:
             response = requests.post(
-                f"{self.base_url}/auth/register",
-                json={
-                    "email": email,
-                    "password": password,
-                    "confirm_password": password
-                },
+                f"{SUPABASE_URL}/auth/v1/signup",
+                headers={"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"},
+                json={"email": email, "password": password},
                 timeout=10
             )
             passed = response.status_code in [200, 201]
-            
+
             if passed:
                 data = response.json()
                 self.log_test(f"Register {email}", True, f"Status: {data.get('status', 'N/A')}")
             else:
                 self.log_test(f"Register {email}", False, f"Status: {response.status_code}, Body: {response.text[:200]}")
-            
+
             return passed
         except Exception as e:
             self.log_test(f"Register {email}", False, f"Error: {str(e)}")

@@ -96,11 +96,11 @@ In the Space: **Settings** → **Variables and secrets** → **New secret**
 
 | Name | Value |
 |------|--------|
-| `DATABASE_URL` | Your `postgresql+asyncpg://...` string from Part A |
+| `DATABASE_URL` | Your `postgresql+asyncpg://...` string from Part A (use the service-role/owner connection — it bypasses RLS for the backend) |
 | `NIM_API_KEY` | Your NVIDIA NIM key (`nvapi-...`) |
-| `JWT_SECRET` | Long random string (e.g. 32+ chars) |
-| `ADMIN_EMAIL` | `admin@sentry.local` (or your email) |
-| `ADMIN_PASSWORD` | Strong password for first admin login |
+| `SUPABASE_JWT_SECRET` | Your Supabase project's JWT secret (Dashboard → Settings → API → JWT Secret). The backend uses this to verify Supabase-issued tokens. |
+| `REACT_APP_SUPABASE_URL` | `https://<project-ref>.supabase.co` — needed at **frontend build** time to init `supabase-js` |
+| `REACT_APP_SUPABASE_ANON_KEY` | Your project's public **anon** key (safe to expose client-side — RLS protects the data) |
 | `CORS_ORIGINS` | `*` (same-origin UI is fine; `*` is simplest) |
 
 Optional: `DATABASE_SSL=true` — auto-enabled when the URL contains `supabase.co`.
@@ -116,9 +116,31 @@ https://huggingface.co/spaces/YOUR_HF_USER/sentry-rag
 
 or the direct app URL shown on the Space (often `*.hf.space`).
 
-### 6. Log in
-Use `ADMIN_EMAIL` / `ADMIN_PASSWORD` from secrets.  
-Then upload documents and chat as usual.
+### 6. Accounts & first admin
+Auth is now handled by **Supabase Auth** (client-side via `supabase-js`), not the
+backend. New signups are `pending` with no role until an admin approves them.
+
+- **New deploy:** open the app → **Create account** → sign up with an email +
+  password. A `profiles` row is auto-created with `status = 'pending'` by the
+  `handle_new_user` trigger.
+- **Promote the first admin:** right after the first admin re-registers, run one
+  SQL statement (Supabase SQL Editor) to approve them and assign the admin role,
+  then they can approve everyone else through the admin console:
+  ```sql
+  update public.profiles set role = 'admin', status = 'approved'
+  where email = 'your-admin-email@example.com';
+  ```
+- **Existing users (re-registration migration):** the old self-hosted `users`
+  rows / bcrypt hashes can't be imported into Supabase Auth. Have each existing
+  user sign up again with a new password; the admin matches them by email in
+  `profiles` and re-approves / re-assigns their role.
+- **Email confirmation:** keep **Confirm email** disabled (Authentication →
+  Providers → Email) so login works immediately and the pending-approval flow
+  is unchanged.
+- **Legacy `users` table:** the backend now reads/writes `profiles` only. Once
+  everyone has re-registered you can drop the old table (`drop table if exists
+  public.users;`). `SCHEMA_SQL` recreates an empty `users` table on startup
+  unless its block is later removed from `backend/database.py`.
 
 Health check: `https://YOUR-SPACE-URL/api/health` → `{"status":"ok"}`
 
@@ -128,9 +150,10 @@ Health check: `https://YOUR-SPACE-URL/api/health` → `{"status":"ok"}`
 
 | Layer | Where |
 |--------|--------|
+| Auth / sessions | **Supabase Auth** (client-side `supabase-js`; backend verifies its JWT) |
 | React UI | Built in Docker, served by FastAPI |
 | FastAPI `/api/*` | Same Space container (port **7860**) |
-| Postgres + pgvector | **Supabase** |
+| Postgres + pgvector | **Supabase** (RLS enabled, zero policies — backend uses the service-role connection) |
 | Embeddings + chat | **NVIDIA NIM** (your API key) |
 
 Same-origin means the browser calls `/api/...` on the Space URL — no separate frontend host.
@@ -147,9 +170,9 @@ docker build -t sentry-rag .
 docker run --rm -p 7860:7860 \
   -e DATABASE_URL="postgresql+asyncpg://..." \
   -e NIM_API_KEY="nvapi-..." \
-  -e JWT_SECRET="dev-secret" \
-  -e ADMIN_EMAIL="admin@sentry.local" \
-  -e ADMIN_PASSWORD="admin123" \
+  -e SUPABASE_JWT_SECRET="<supabase-jwt-secret>" \
+  -e REACT_APP_SUPABASE_URL="https://<project-ref>.supabase.co" \
+  -e REACT_APP_SUPABASE_ANON_KEY="<anon-key>" \
   sentry-rag
 ```
 

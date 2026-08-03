@@ -1,38 +1,22 @@
-"""Password hashing (bcrypt) and JWT utilities."""
+"""Supabase Auth JWT verification.
+
+The app no longer hashes passwords or issues tokens — Supabase Auth does.
+We only verify the HS256-signed JWT that Supabase issues (signed with the
+project's `SUPABASE_JWT_SECRET`) so the backend can trust the caller's
+identity and read their `profiles` row.
+"""
 import os
-from datetime import datetime, timedelta, timezone
-import bcrypt
 import jwt
 
-JWT_SECRET = os.environ.get("JWT_SECRET", "change-me")
-JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
-JWT_EXPIRE_MINUTES = int(os.environ.get("JWT_EXPIRE_MINUTES", "1440"))
+SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET", "")
 
 
-def hash_password(password: str) -> str:
-    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+def verify_supabase_token(token: str) -> dict:
+    """Verify a Supabase-issued JWT (HS256) and return its payload.
 
-
-def verify_password(password: str, hashed: str) -> bool:
-    try:
-        return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
-    except Exception:
-        return False
-
-
-def create_access_token(user_id: str, email: str, role: str | None, status: str, must_change_password: bool) -> str:
-    now = datetime.now(timezone.utc)
-    payload = {
-        "sub": str(user_id),
-        "email": email,
-        "role": role,
-        "status": status,
-        "mcp": must_change_password,
-        "iat": int(now.timestamp()),
-        "exp": int((now + timedelta(minutes=JWT_EXPIRE_MINUTES)).timestamp()),
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-
-
-def decode_token(token: str) -> dict:
-    return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    Raises jwt.ExpiredSignatureError / jwt.InvalidTokenError on failure;
+    callers map those to HTTP 401.
+    """
+    if not SUPABASE_JWT_SECRET:
+        raise jwt.InvalidTokenError("SUPABASE_JWT_SECRET is not configured")
+    return jwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"])

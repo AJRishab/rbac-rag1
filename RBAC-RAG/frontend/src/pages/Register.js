@@ -28,8 +28,7 @@ export default function Register() {
       toast.success('Account created — awaiting admin approval');
       navigate('/pending', { replace: true, state: { email: email.trim() } });
     } catch (err) {
-      const detail = err?.response?.data?.detail;
-      const msg = typeof detail === 'string' ? detail : 'Registration failed';
+      const msg = err?.message || err?.response?.data?.detail || 'Registration failed';
       setError(msg);
       toast.error(msg);
     } finally {

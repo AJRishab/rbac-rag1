@@ -28,7 +28,7 @@ export default function Login() {
       const to = location.state?.from?.pathname || '/chat';
       navigate(to, { replace: true });
     } catch (err) {
-      const msg = err?.response?.data?.detail || 'Login failed';
+      const msg = err?.error_description || err?.message || err?.response?.data?.detail || 'Login failed';
       const display = typeof msg === 'string' ? msg : 'Login failed';
       setError(display);
       toast.error(display);

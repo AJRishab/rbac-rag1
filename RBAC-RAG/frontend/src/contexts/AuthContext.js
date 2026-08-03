@@ -1,17 +1,20 @@
-import React, { createContext, useContext, useEffect, useMemo, useState, useCallback } from 'react';
-import { api, setAuthToken, getStoredToken } from '@/lib/api';
+import React, {
+  createContext, useContext, useEffect, useMemo, useState, useCallback,
+} from 'react';
+import { supabase } from '@/lib/supabaseClient';
+import { api } from '@/lib/api';
 
 const AuthContext = createContext(null);
 
-// `api` is a module-scoped axios singleton, `setAuthToken` and `getStoredToken`
-// are module-scoped functions, and setState functions from useState are stable
-// by React contract. They intentionally do not appear in dependency arrays.
+// `api` and `supabase` are stable module-scoped references, and the useState
+// setter is stable by React contract — intentionally not in dependency arrays.
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [initializing, setInitializing] = useState(true);
 
   const refreshMe = useCallback(async () => {
+    // Fetch the matching profiles row (role/status/must_change_password).
     try {
       const { data } = await api.get('/auth/me');
       setUser(data);
@@ -19,45 +22,54 @@ export function AuthProvider({ children }) {
     } catch (err) {
       console.warn('[auth] /auth/me failed — clearing session', err?.response?.status || err?.message);
       setUser(null);
-      setAuthToken(null);
       return null;
     }
   }, []);
 
   useEffect(() => {
     let cancelled = false;
+
+    // Hydrate from an existing Supabase session on first mount, then fetch /me.
     (async () => {
-      const t = getStoredToken();
-      if (t) await refreshMe();
+      const { data } = await supabase.auth.getSession();
+      if (data?.session) await refreshMe();
       if (!cancelled) setInitializing(false);
     })();
-    return () => { cancelled = true; };
+
+    // React to sign-in / sign-out / token-refresh events from Supabase.
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session) refreshMe();
+      else setUser(null);
+    });
+
+    return () => {
+      cancelled = true;
+      listener.subscription.unsubscribe();
+    };
   }, [refreshMe]);
 
   const login = useCallback(async (email, password) => {
-    const { data } = await api.post('/auth/login', { email, password });
-    setAuthToken(data.token);
-    setUser(data.user);
-    return data.user;
-  }, []);
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+    return refreshMe();
+  }, [refreshMe]);
 
   const register = useCallback(async (email, password) => {
-    const { data } = await api.post('/auth/register', { email, password });
-    return data;
+    const { error } = await supabase.auth.signUp({ email, password });
+    if (error) throw error;
+    return { ok: true, email };
   }, []);
 
-  const changePassword = useCallback(async (currentPassword, newPassword) => {
-    const { data } = await api.post('/auth/change-password', {
-      current_password: currentPassword,
-      new_password: newPassword,
-    });
-    setAuthToken(data.token);
-    setUser(data.user);
-    return data.user;
-  }, []);
+  const changePassword = useCallback(async (newPassword) => {
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    if (error) throw error;
+    // Clear the forced-change flag on the profile via the backend.
+    await api.post('/auth/change-password');
+    return refreshMe();
+  }, [refreshMe]);
 
-  const logout = useCallback(() => {
-    setAuthToken(null);
+  const logout = useCallback(async () => {
+    await supabase.auth.signOut();
     setUser(null);
   }, []);
 

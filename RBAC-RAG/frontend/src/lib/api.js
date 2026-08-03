@@ -1,78 +1,40 @@
-// Axios instance with base URL + JWT bearer.
+// Axios instance with base URL + Supabase session bearer token.
 //
-// Storage: JWT is kept in localStorage so a user survives a full page reload.
-// httpOnly cookies would be safer against XSS but require server-side session
-// state + CSRF protection, which is out of v1 scope. We mitigate XSS the way
-// React does by default (auto-escaping) and by never rendering untrusted HTML.
-// On any 401 from the server we drop the token immediately.
+// The auth token is owned by Supabase (supabase-js persists + auto-refreshes
+// the session). We don't store a token in localStorage ourselves — a request
+// interceptor pulls the current session's access_token and attaches it as a
+// Bearer token to every call to the FastAPI backend. On any 401 we sign the
+// Supabase session out so the app returns to login.
 import axios from 'axios';
+import { supabase } from '@/lib/supabaseClient';
 
 // Empty string = same-origin (Hugging Face Space). Local .env sets http://localhost:8000.
-const BACKEND_URL = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "");
+const BACKEND_URL = (process.env.REACT_APP_BACKEND_URL || '').replace(/\/$/, '');
 export const API_BASE = `${BACKEND_URL}/api`;
-
-const TOKEN_KEY = 'sentry_token';
 
 export const api = axios.create({
   baseURL: API_BASE,
   timeout: 120_000,
 });
 
-let _token = null;
-
-function _safeGet() {
-  try {
-    return localStorage.getItem(TOKEN_KEY);
-  } catch (err) {
-    // Access to localStorage can throw in incognito / storage-partitioned
-    // contexts. We fall back to in-memory only in that case.
-    console.warn('[auth] localStorage.getItem failed', err);
-    return null;
-  }
-}
-
-function _safeSet(value) {
-  try {
-    if (value == null) localStorage.removeItem(TOKEN_KEY);
-    else localStorage.setItem(TOKEN_KEY, value);
-  } catch (err) {
-    console.warn('[auth] localStorage write failed', err);
-  }
-}
-
-export function setAuthToken(token) {
-  _token = token;
+// Attach the current Supabase session's access_token as a Bearer token.
+api.interceptors.request.use(async (config) => {
+  const { data } = await supabase.auth.getSession();
+  const token = data?.session?.access_token;
   if (token) {
-    api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-    _safeSet(token);
-  } else {
-    delete api.defaults.headers.common['Authorization'];
-    _safeSet(null);
+    config.headers.Authorization = `Bearer ${token}`;
   }
-}
+  return config;
+});
 
-export function getStoredToken() {
-  return _safeGet();
-}
-
-// Hydrate on module load if a token exists
-const existing = _safeGet();
-if (existing) {
-  _token = existing;
-  api.defaults.headers.common['Authorization'] = `Bearer ${existing}`;
-}
-
-export function getAuthToken() {
-  return _token;
-}
-
-// Global 401 handler — drop stale token so the app forces re-login.
+// Drop the Supabase session on any 401 so the app forces re-login.
 api.interceptors.response.use(
   (r) => r,
-  (err) => {
+  async (err) => {
     if (err?.response?.status === 401) {
-      setAuthToken(null);
+      await supabase.auth.signOut();
     }
     return Promise.reject(err);
   },
 );
+

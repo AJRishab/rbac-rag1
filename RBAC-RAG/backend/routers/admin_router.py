@@ -28,7 +28,7 @@ SUPPORTED_EXTS = (".txt", ".md", ".markdown", ".pdf", ".docx")
 @router.get("/users", response_model=list[UserOut])
 async def list_users(admin: dict = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        text("SELECT id, email, role, status, must_change_password, created_at FROM users ORDER BY created_at DESC")
+        text("SELECT id, email, role, status, must_change_password, created_at FROM profiles ORDER BY created_at DESC")
     )
     return [
         UserOut(
@@ -44,12 +44,12 @@ async def _update_user_role(db: AsyncSession, user_id: str, role: str, approve: 
         raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of {sorted(VALID_ROLES)}")
     if approve:
         sql = (
-            "UPDATE users SET status = 'approved', role = :r WHERE id = CAST(:i AS uuid) "
+            "UPDATE profiles SET status = 'approved', role = :r WHERE id = CAST(:i AS uuid) "
             "RETURNING id, email, role, status, must_change_password, created_at"
         )
     else:
         sql = (
-            "UPDATE users SET role = :r WHERE id = CAST(:i AS uuid) "
+            "UPDATE profiles SET role = :r WHERE id = CAST(:i AS uuid) "
             "RETURNING id, email, role, status, must_change_password, created_at"
         )
     row = (await db.execute(text(sql), {"r": role, "i": user_id})).first()
@@ -82,7 +82,7 @@ def _fmt_vec(v: list[float]) -> str:
 async def list_documents(admin: dict = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     result = await db.execute(text(
         "SELECT d.id, d.title, d.filename, d.allowed_roles, d.status, d.chunk_count, d.uploaded_at, u.email AS uploader_email "
-        "FROM documents d LEFT JOIN users u ON u.id = d.uploaded_by "
+        "FROM documents d LEFT JOIN profiles u ON u.id = d.uploaded_by "
         "ORDER BY d.uploaded_at DESC"
     ))
     return [

@@ -1,7 +1,5 @@
-"""Database engine, session, schema init, seed default admin."""
+"""Database engine, session, schema init, Supabase Auth migration."""
 import os
-import secrets
-import string
 import logging
 from pathlib import Path
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
@@ -103,43 +101,70 @@ SCHEMA_SQL = [
 ]
 
 
-def _generate_password(length: int = 16) -> str:
-    alphabet = string.ascii_letters + string.digits + "@#!$%^&*"
-    return "".join(secrets.choice(alphabet) for _ in range(length))
+def _split_sql(sql: str) -> list[str]:
+    """Split a SQL script into statements, respecting `$$...$$` and '...' blocks."""
+    statements: list[str] = []
+    current: list[str] = []
+    in_dollar = False
+    in_squote = False
+    i = 0
+    n = len(sql)
+    while i < n:
+        # SQL `--` line comment (outside strings / dollar quotes): skip to EOL so
+        # apostrophes inside comments can't corrupt single-quote state.
+        if not in_squote and not in_dollar and sql[i:i + 2] == "--":
+            while i < n and sql[i] != "\n":
+                i += 1
+            continue
+        if not in_squote and sql[i:i + 2] == "$$":
+            in_dollar = not in_dollar
+            current.append("$$")
+            i += 2
+            continue
+        ch = sql[i]
+        if ch == "'" and not in_dollar:
+            in_squote = not in_squote
+            current.append(ch)
+            i += 1
+            continue
+        if ch == ";" and not in_dollar and not in_squote:
+            stmt = "".join(current).strip()
+            if stmt:
+                statements.append(stmt)
+            current = []
+            i += 1
+            continue
+        current.append(ch)
+        i += 1
+    last = "".join(current).strip()
+    if last:
+        statements.append(last)
+    return statements
 
 
 async def init_db():
-    """Create schema (idempotent) + seed default admin."""
+    """Create the schema (idempotent) and apply the Supabase Auth migration.
+
+    Identity now lives in public.profiles (mirroring Supabase's auth.users);
+    the legacy users table is deprecated and no longer read or written by the
+    app. Admin / user accounts are created through Supabase Auth (client-side
+    signup) — there is no backend password seed anymore.
+    """
     async with engine.begin() as conn:
         for stmt in SCHEMA_SQL:
             await conn.execute(text(stmt))
 
-    # Seed default admin
-    from auth import hash_password
-    async with SessionLocal() as session:
-        result = await session.execute(text("SELECT COUNT(*) FROM users WHERE role = 'admin'"))
-        admin_count = result.scalar()
-
-        if admin_count == 0:
-            admin_email = os.environ.get("ADMIN_EMAIL", "admin@sentry.local").strip() or "admin@sentry.local"
-            admin_password_env = os.environ.get("ADMIN_PASSWORD", "").strip()
-            if admin_password_env:
-                admin_password = admin_password_env
-                must_change = False
-            else:
-                admin_password = _generate_password()
-                must_change = True
-
-            pwd_hash = hash_password(admin_password)
-            await session.execute(
-                text(
-                    "INSERT INTO users (email, password_hash, role, status, must_change_password) "
-                    "VALUES (:e, :p, 'admin', 'approved', :m) "
-                    "ON CONFLICT (email) DO NOTHING"
-                ),
-                {"e": admin_email, "p": pwd_hash, "m": must_change},
-            )
-            await session.commit()
-
-            banner = "=" * 70
-            logger.warning("\n%s\nSENTRY RAG - DEFAULT ADMIN SEEDED\n%s\nEmail:    %s\nPassword: %s\nMust change on first login: %s\n%s\n", banner, banner, admin_email, admin_password, must_change, banner)
+        # Supabase Auth migration: profiles, new-user trigger, FK repoint, RLS.
+        # Idempotent. Statements run individually so a plain Postgres dev DB
+        # (no Supabase auth schema) skips only the auth-dependent ones.
+        migration_path = Path(__file__).parent / "migrations" / "001_supabase_auth.sql"
+        if migration_path.is_file():
+            migration_sql = migration_path.read_text(encoding="utf-8")
+            for stmt in _split_sql(migration_sql):
+                try:
+                    await conn.execute(text(stmt))
+                except Exception as exc:  # e.g. no auth.users on plain Postgres
+                    logger.warning(
+                        "Supabase auth migration statement skipped (%s): %s",
+                        type(exc).__name__, exc,
+                    )

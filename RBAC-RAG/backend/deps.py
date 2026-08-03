@@ -1,4 +1,4 @@
-"""FastAPI dependencies: current_user (JWT), require_admin, require_approved."""
+"""FastAPI dependencies: current_user (Supabase JWT), require_admin, require_approved."""
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import text
@@ -6,9 +6,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import jwt
 
 from database import SessionLocal
-from auth import decode_token
+from auth import verify_supabase_token
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
+# Bearer extraction only — Supabase issues the token and login is client-side,
+# so tokenUrl is informational (there is no password-grant endpoint anymore).
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/me", auto_error=False)
 
 
 async def get_db() -> AsyncSession:
@@ -19,16 +21,20 @@ async def get_db() -> AsyncSession:
 async def get_current_user(token: str | None = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)):
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
     try:
-        payload = decode_token(token)
+        payload = verify_supabase_token(token)
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
     user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
     result = await db.execute(
-        text("SELECT id, email, role, status, must_change_password FROM users WHERE id = CAST(:i AS uuid)"),
+        text("SELECT id, email, role, status, must_change_password FROM profiles WHERE id = CAST(:i AS uuid)"),
         {"i": user_id},
     )
     row = result.first()
