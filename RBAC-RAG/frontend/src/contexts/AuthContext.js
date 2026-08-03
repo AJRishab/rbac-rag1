@@ -51,7 +51,14 @@ export function AuthProvider({ children }) {
   const login = useCallback(async (email, password) => {
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) throw error;
-    return refreshMe();
+    const me = await refreshMe();
+    if (!me) {
+      throw new Error(
+        'Signed in, but the server could not load your profile. ' +
+        'Check that SUPABASE_JWT_SECRET is set correctly and the backend is running.',
+      );
+    }
+    return me;
   }, [refreshMe]);
 
   const register = useCallback(async (email, password) => {
