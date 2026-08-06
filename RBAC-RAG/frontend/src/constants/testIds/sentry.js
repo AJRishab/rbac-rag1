@@ -1,6 +1,5 @@
 // constants/testIds/sentry.js - central test IDs for Sentry RAG
 export const LANDING = {
-  navSkipToConsole: 'landing-nav-skip-to-console-link',
   navDashboard: 'landing-nav-dashboard-button',
   heroPrimaryCta: 'landing-hero-primary-cta-button',
   heroSecondaryCta: 'landing-hero-secondary-cta-button',

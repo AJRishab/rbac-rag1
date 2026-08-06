@@ -18,25 +18,15 @@ export default function Landing() {
             </div>
             <span className="font-display font-bold text-lg tracking-tight">SENTRY<span className="text-cyan-300">/RAG</span></span>
           </Link>
-          <div className="flex items-center gap-2 sm:gap-3">
-            <Button
-              asChild
-              variant="outline"
-              size="sm"
-              data-testid={LANDING.navDashboard}
-              className="border-cyan-400/30 bg-cyan-500/8 hover:bg-cyan-500/12 text-cyan-100"
-            >
-              <Link to="/chat">Dashboard</Link>
-            </Button>
-            <Link
-              to="/login"
-              data-testid={LANDING.navSkipToConsole}
-              className="group flex items-center gap-1.5 text-sm text-slate-300 hover:text-white transition-colors"
-            >
-              Skip to console
-              <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-0.5 transition-transform" strokeWidth={1.75} />
-            </Link>
-          </div>
+          <Button
+            asChild
+            variant="outline"
+            size="sm"
+            data-testid={LANDING.navDashboard}
+            className="border-cyan-400/30 bg-cyan-500/8 hover:bg-cyan-500/12 text-cyan-100"
+          >
+            <Link to="/chat">Dashboard</Link>
+          </Button>
         </div>
       </nav>
 
