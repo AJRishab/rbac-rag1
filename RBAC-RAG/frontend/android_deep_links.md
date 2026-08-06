@@ -120,7 +120,10 @@ update the `package_name` in `assetlinks.json` accordingly.
   redirect-to-store). This is default Android App Links behavior — no extra
   config needed.
 - **App installed + verification succeeded** → the link opens the APK
-  directly; Capacitor hands `/auth/callback` to the web app's route.
+  directly. Capacitor delivers the `/auth/callback` URL to the WebView via
+  the `appUrlOpen` event (the WebView itself stays on the app's local
+  `https://localhost` origin — it does **not** navigate away). The web app
+  handles that event and applies the Supabase session (see §7).
 - **Verification failed** (bad fingerprint / unreachable JSON) → Android
   falls back to showing a chooser or opening the browser.
 
@@ -151,12 +154,51 @@ app (or the web page if the app is uninstalled).
 
 ---
 
-## 7. Files changed in this task
+## 7. Capacitor code to handle the callback URL in-app
+
+**Install the plugin:** add `@capacitor/app` (already added to
+`frontend/package.json`):
+
+```bash
+cd frontend
+npm install
+npx cap sync android   # registers the @capacitor/app native plugin in the Android project
+```
+
+**Why this is required on Android:** App Links hand the full callback URL to
+the Android activity, but the Capacitor WebView keeps serving the app from its
+local origin (`https://localhost`). The browser's `window.location` never
+becomes `.../auth/callback`, so `detectSessionInUrl` alone won't see the
+tokens. The URL must instead be read through the `@capacitor/app` "appUrlOpen"
+event (and `getLaunchUrl` for a cold start via the link).
+
+**Handler added to `frontend/src/contexts/AuthContext.js`** — in a new
+`useEffect` that:
+
+1. Dynamically imports `@capacitor/core` and `@capacitor/app` and bails out on
+   non-native (plain browser) so it's a no-op on the web build.
+2. Reads `App.getLaunchUrl()` (cold launch via the link) and listens for
+   `appUrlOpen` (warm link) — both filtered to `.../auth/callback`.
+3. Parses `access_token` / `refresh_token` from the URL hash and calls
+   `supabase.auth.setSession({ access_token, refresh_token })`.
+4. The existing `onAuthStateChange` listener already in `AuthContext` then fires
+   `SIGNED_IN` → `refreshMe()` → the user's `role/status/must_change_password`
+   are fetched from `/auth/me` → ProtectedRoute routes them to `/pending` or
+   `/chat` as usual. No auth/RBAC flow changed.
+
+The tokens are delivered via the hash fragment, e.g.
+`https://rbac-rag-nine.vercel.app/auth/callback#access_token=...&refresh_token=...&type=signup`.
+
+---
+
+## 8. Files changed in this task
 
 | File | Change |
 |------|--------|
 | `frontend/android/app/src/main/AndroidManifest.xml` | Added `autoVerify` `VIEW` intent-filter for `https://rbac-rag-nine.vercel.app/auth/callback`. |
 | `frontend/public/.well-known/assetlinks.json` | **New** — Android App Links association file (deployed to `/.well-known/assetlinks.json`). |
+| `frontend/package.json` | **Added** `@capacitor/app` dependency (used to receive the deep-link URL in-app). |
+| `frontend/src/contexts/AuthContext.js` | **Added** a Capacitor deep-link `useEffect` that reads `/auth/callback` via `appUrlOpen`/`getLaunchUrl` and applies the Supabase session. |
 | `android_deep_links.md` | This document. |
 
 No backend, RBAC, authentication, or web callback logic was modified.

@@ -48,6 +48,57 @@ export function AuthProvider({ children }) {
     };
   }, [refreshMe]);
 
+  // Capacitor Android App Links: when the app is opened via
+  // https://rbac-rag-nine.vercel.app/auth/callback, the WebView does NOT
+  // navigate there — Capacitor delivers the URL through the `appUrlOpen`
+  // event instead. Parse the Supabase session tokens from that URL and set
+  // the session (this fires onAuthStateChange → refreshMe above).
+  useEffect(() => {
+    let active = true;
+    let unsub = null;
+
+    (async () => {
+      try {
+        const { Capacitor } = await import('@capacitor/core');
+        const { App } = await import('@capacitor/app');
+        if (!Capacitor.isNativePlatform()) return;
+
+        const handleCallback = async (url) => {
+          try {
+            const parsed = new URL(url);
+            if (!parsed.pathname.endsWith('/auth/callback')) return;
+
+            const hash = new URLSearchParams(parsed.hash.replace(/^#/, ''));
+            const access_token = hash.get('access_token');
+            const refresh_token = hash.get('refresh_token');
+            if (access_token && refresh_token) {
+              const { error } = await supabase.auth.setSession({ access_token, refresh_token });
+              if (error) console.warn('[auth] deep-link setSession failed', error?.message);
+            }
+          } catch (err) {
+            console.warn('[auth] failed to process deep-link callback', err);
+          }
+        };
+
+        // Handle both a cold launch via the deep link and warm-link events.
+        const launch = await App.getLaunchUrl();
+        if (launch?.url && active) handleCallback(launch.url);
+
+        const { listener } = await App.addListener('appUrlOpen', ({ url }) => {
+          if (active) handleCallback(url);
+        });
+        unsub = listener.remove;
+      } catch {
+        // Capacitor plugins unavailable (plain browser) — ignore.
+      }
+    })();
+
+    return () => {
+      active = false;
+      if (typeof unsub === 'function') unsub();
+    };
+  }, []);
+
   const login = useCallback(async (email, password) => {
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) throw error;
