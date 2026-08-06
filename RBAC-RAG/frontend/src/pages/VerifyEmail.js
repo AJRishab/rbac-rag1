@@ -1,13 +1,32 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { MailCheck, ArrowRight } from 'lucide-react';
+import { toast } from 'sonner';
+import { MailCheck, ArrowRight, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { AuthShell } from './Login';
+import { useAuth } from '@/contexts/AuthContext';
 
 export default function VerifyEmail() {
   const navigate = useNavigate();
   const location = useLocation();
   const email = location.state?.email;
+  const { resendVerification } = useAuth();
+  const [sending, setSending] = useState(false);
+
+  const onResend = async () => {
+    if (!email) {
+      return toast.error('No email on file — please re-register');
+    }
+    setSending(true);
+    try {
+      await resendVerification(email);
+      toast.success('Verification email sent — check your inbox');
+    } catch (err) {
+      toast.error(err?.message || 'Could not resend verification email');
+    } finally {
+      setSending(false);
+    }
+  };
 
   return (
     <AuthShell title="Confirm your email" subtitle="Almost there — one last step.">
@@ -42,6 +61,19 @@ export default function VerifyEmail() {
               Return here and sign in with your email and password.
             </li>
           </ul>
+          {email && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={onResend}
+              disabled={sending}
+              className="mt-3 w-full text-cyan-200 hover:bg-white/5 disabled:opacity-60"
+            >
+              <RefreshCw className="w-3.5 h-3.5 mr-1.5" strokeWidth={1.75} />
+              {sending ? 'Sending…' : 'Didn&rsquo;t get it? Resend verification link'}
+            </Button>
+          )}
         </div>
 
         <Button

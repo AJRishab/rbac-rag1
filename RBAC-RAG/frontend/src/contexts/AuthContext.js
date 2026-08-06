@@ -124,6 +124,19 @@ export function AuthProvider({ children }) {
     return { ok: true, email };
   }, []);
 
+  // Send a fresh email-verification link (e.g. after an expired mailbox token).
+  const resendVerification = useCallback(async (email) => {
+    const { error } = await supabase.auth.resend({
+      type: "signup",
+      email,
+      options: {
+        emailRedirectTo: "https://rbac-rag-nine.vercel.app/auth/callback",
+      },
+    });
+    if (error) throw error;
+    return { ok: true, email };
+  }, []);
+
   const changePassword = useCallback(async (newPassword) => {
     const { error } = await supabase.auth.updateUser({ password: newPassword });
     if (error) throw error;
@@ -139,7 +152,8 @@ export function AuthProvider({ children }) {
 
   const value = useMemo(() => ({
     user, initializing, login, register, logout, refreshMe, changePassword,
-  }), [user, initializing, login, register, logout, refreshMe, changePassword]);
+    resendVerification,
+  }), [user, initializing, login, register, logout, refreshMe, changePassword, resendVerification]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
