@@ -12,7 +12,7 @@
         radial-gradient(1200px 500px at 20% -10%, rgba(34, 211, 238, 0.06), transparent 60%),
         repeating-linear-gradient(0deg, rgba(148, 163, 184, 0.04) 0px, rgba(148, 163, 184, 0.04) 1px, transparent 1px, transparent 32px),
         repeating-linear-gradient(90deg, rgba(148, 163, 184, 0.03) 0px, rgba(148, 163, 184, 0.03) 1px, transparent 1px, transparent 32px);
-    padding-top: var(--safe-top);
+    padding-top: calc(var(--navbar-height) + var(--safe-top));
     padding-bottom: var(--safe-bottom);
     padding-left: var(--safe-left);
     padding-right: var(--safe-right);

@@ -55,7 +55,7 @@ export function AuthProvider({ children }) {
     if (!me) {
       throw new Error(
         'Signed in, but the server could not load your profile. ' +
-        'Check that SUPABASE_JWT_SECRET is set correctly and the backend is running.',
+        'Check that SUPABASE_URL is set correctly and the backend is running.',
       );
     }
     return me;

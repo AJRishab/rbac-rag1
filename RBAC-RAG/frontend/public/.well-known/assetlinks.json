@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.ajrishab.sentryrag",
+      "sha256_cert_fingerprints": [
+        "7C4F53A72913C58CF5AA0E5B87605D9F0AF469E147BAD5EB24BB5D5D6789DBB0"
+      ]
+    }
+  }
+]

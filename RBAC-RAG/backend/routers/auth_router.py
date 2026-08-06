@@ -15,17 +15,10 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 @router.get("/me", response_model=UserOut)
-async def me(user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        text("SELECT id, email, role, status, must_change_password, created_at FROM profiles WHERE id = CAST(:i AS uuid)"),
-        {"i": user["id"]},
-    )
-    row = result.first()
-    if not row:
-        raise HTTPException(status_code=404, detail="User not found")
+async def me(user: dict = Depends(get_current_user)):
     return UserOut(
-        id=str(row.id), email=row.email, role=row.role, status=row.status,
-        must_change_password=row.must_change_password, created_at=row.created_at,
+        id=user["id"], email=user["email"], role=user["role"], status=user["status"],
+        must_change_password=user["must_change_password"], created_at=user.get("created_at"),
     )
 
 

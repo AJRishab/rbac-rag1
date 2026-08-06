@@ -13,6 +13,7 @@ from schemas import (
     ChunkOut, UpdateChunkRolesRequest,
 )
 from ingest import chunk_file
+from utils import fmt_vec
 import nim_client
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -73,10 +74,6 @@ async def change_user_role(user_id: str, req: ApproveUserRequest, admin: dict = 
 
 
 # ---------- Documents ----------
-
-def _fmt_vec(v: list[float]) -> str:
-    return "[" + ",".join(f"{x:.7f}" for x in v) + "]"
-
 
 @router.get("/documents", response_model=list[DocumentOut])
 async def list_documents(admin: dict = Depends(require_admin), db: AsyncSession = Depends(get_db)):
@@ -165,7 +162,7 @@ async def _persist_document(
                 "INSERT INTO chunks (document_id, chunk_index, content, embedding, allowed_roles, roles_ai_suggested, source_page) "
                 "VALUES (CAST(:d AS uuid), :i, :c, CAST(:e AS vector), :r, true, :p)"
             ),
-            {"d": str(doc.id), "i": idx, "c": content, "e": _fmt_vec(emb), "r": roles, "p": source_page},
+            {"d": str(doc.id), "i": idx, "c": content, "e": fmt_vec(emb), "r": roles, "p": source_page},
         )
     await db.commit()
     return doc

@@ -98,10 +98,10 @@ In the Space: **Settings** → **Variables and secrets** → **New secret**
 |------|--------|
 | `DATABASE_URL` | Your `postgresql+asyncpg://...` string from Part A (use the service-role/owner connection — it bypasses RLS for the backend) |
 | `NIM_API_KEY` | Your NVIDIA NIM key (`nvapi-...`) |
-| `SUPABASE_JWT_SECRET` | Your Supabase project's JWT secret (Dashboard → Settings → API → JWT Secret). The backend uses this to verify Supabase-issued tokens. |
+| `SUPABASE_URL` | `https://<project-ref>.supabase.co` — the backend fetches the project's JWKS signing key here to verify Supabase-issued tokens (`/auth/v1/.well-known/jwks.json`, ES256). |
 | `REACT_APP_SUPABASE_URL` | `https://<project-ref>.supabase.co` — needed at **frontend build** time to init `supabase-js` |
 | `REACT_APP_SUPABASE_ANON_KEY` | Your project's public **anon** key (safe to expose client-side — RLS protects the data) |
-| `CORS_ORIGINS` | `*` (same-origin UI is fine; `*` is simplest) |
+| `CORS_ORIGINS` | Comma-separated allowed origins. Backend defaults to `https://rbac-rag-nine.vercel.app` (no wildcard) — set it to your real frontend origin(s). |
 
 Optional: `DATABASE_SSL=true` — auto-enabled when the URL contains `supabase.co`.
 
@@ -170,7 +170,7 @@ docker build -t sentry-rag .
 docker run --rm -p 7860:7860 \
   -e DATABASE_URL="postgresql+asyncpg://..." \
   -e NIM_API_KEY="nvapi-..." \
-  -e SUPABASE_JWT_SECRET="<supabase-jwt-secret>" \
+  -e SUPABASE_URL="https://<project-ref>.supabase.co" \
   -e REACT_APP_SUPABASE_URL="https://<project-ref>.supabase.co" \
   -e REACT_APP_SUPABASE_ANON_KEY="<anon-key>" \
   sentry-rag

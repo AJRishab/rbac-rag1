@@ -19,7 +19,7 @@ export default function Admin() {
 
   return (
     <div className="app-shell text-slate-100 overflow-x-hidden">
-      <div className="sticky z-20 h-14 border-b border-white/8 backdrop-blur-md bg-[hsl(var(--background))]/80 flex items-center justify-between gap-2 px-2 sm:px-6" style={{ top: 'var(--safe-top)' }}>
+      <div className="top-nav z-20 border-b border-white/8 backdrop-blur-md bg-[hsl(var(--background))]/80 flex items-center justify-between gap-2 px-2 sm:px-6">
         <div className="flex items-center gap-1.5 sm:gap-3 min-w-0">
           <Button
             data-testid={ADMIN.backToChatButton}

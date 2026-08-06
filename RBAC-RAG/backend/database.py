@@ -35,21 +35,11 @@ SCHEMA_SQL = [
     "CREATE EXTENSION IF NOT EXISTS vector",
     "CREATE EXTENSION IF NOT EXISTS pgcrypto",
 
-    """CREATE TABLE IF NOT EXISTS users (
-        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        email text UNIQUE NOT NULL,
-        password_hash text NOT NULL,
-        role text,
-        status text NOT NULL DEFAULT 'pending',
-        must_change_password boolean NOT NULL DEFAULT false,
-        created_at timestamptz NOT NULL DEFAULT now()
-    )""",
-
     """CREATE TABLE IF NOT EXISTS documents (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         title text NOT NULL,
         filename text NOT NULL,
-        uploaded_by uuid REFERENCES users(id) ON DELETE SET NULL,
+        uploaded_by uuid,
         allowed_roles text[] NOT NULL DEFAULT ARRAY[]::text[],
         status text NOT NULL DEFAULT 'pending_review' CHECK (status IN ('pending_review', 'published')),
         chunk_count int NOT NULL DEFAULT 0,
@@ -77,7 +67,7 @@ SCHEMA_SQL = [
 
     """CREATE TABLE IF NOT EXISTS conversations (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        user_id uuid NOT NULL,
         title text NOT NULL DEFAULT 'New conversation',
         created_at timestamptz NOT NULL DEFAULT now(),
         updated_at timestamptz NOT NULL DEFAULT now()

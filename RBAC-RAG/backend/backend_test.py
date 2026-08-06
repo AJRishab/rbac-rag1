@@ -14,6 +14,14 @@ BASE_URL = "http://localhost:7860/api"
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 
+# Test accounts (override via env).
+TEST_ADMIN_EMAIL = os.environ.get("TEST_ADMIN_EMAIL", "admin@sentry.local")
+TEST_ADMIN_PASSWORD = os.environ.get("TEST_ADMIN_PASSWORD", "Admin@2026")
+TEST_EMPLOYEE_EMAIL = os.environ.get("TEST_EMPLOYEE_EMAIL", "employee@test.co")
+TEST_MANAGER_EMAIL = os.environ.get("TEST_MANAGER_EMAIL", "manager@test.co")
+TEST_HR_EMAIL = os.environ.get("TEST_HR_EMAIL", "hr@test.co")
+TEST_PASSWORD = os.environ.get("TEST_PASSWORD", "Test@1234")
+
 class SentryRAGTester:
     def __init__(self):
         self.base_url = BASE_URL
@@ -302,40 +310,40 @@ def main():
     
     # Test 2: Login with existing users
     print("\n--- AUTHENTICATION ---")
-    tester.test_login("admin@sentry.local", "Admin@2026")
-    tester.test_login("employee@test.co", "Test@1234")
-    tester.test_login("manager@test.co", "Test@1234")
-    tester.test_login("hr@test.co", "Test@1234")
+    tester.test_login(TEST_ADMIN_EMAIL, TEST_ADMIN_PASSWORD)
+    tester.test_login(TEST_EMPLOYEE_EMAIL, TEST_PASSWORD)
+    tester.test_login(TEST_MANAGER_EMAIL, TEST_PASSWORD)
+    tester.test_login(TEST_HR_EMAIL, TEST_PASSWORD)
     
     # Test 3: Register new pending user
     print("\n--- REGISTRATION ---")
     test_email = f"pending{int(time.time())}@test.co"
-    tester.test_register(test_email, "Test@1234")
+    tester.test_register(test_email, TEST_PASSWORD)
     
     # Test 4: Admin endpoints
     print("\n--- ADMIN ENDPOINTS ---")
-    tester.test_admin_get_users("admin@sentry.local")
-    tester.test_admin_get_documents("admin@sentry.local")
+    tester.test_admin_get_users(TEST_ADMIN_EMAIL)
+    tester.test_admin_get_documents(TEST_ADMIN_EMAIL)
     
     # Test 5: Non-admin cannot access admin
     print("\n--- AUTHORIZATION ---")
-    tester.test_non_admin_cannot_access_admin("employee@test.co")
+    tester.test_non_admin_cannot_access_admin(TEST_EMPLOYEE_EMAIL)
     
     # Test 6: Chat history
     print("\n--- CHAT HISTORY ---")
-    tester.test_chat_history("employee@test.co")
-    tester.test_chat_history("hr@test.co")
+    tester.test_chat_history(TEST_EMPLOYEE_EMAIL)
+    tester.test_chat_history(TEST_HR_EMAIL)
     
     # Test 7: RBAC differentiation - THE CORE TEST
     print("\n--- RBAC DIFFERENTIATION (CORE TEST) ---")
     question = "What is our compensation policy for software engineers?"
     
     print("\n🔍 Testing RBAC: Same question, different roles...")
-    employee_result = tester.test_chat_ask("employee@test.co", question)
+    employee_result = tester.test_chat_ask(TEST_EMPLOYEE_EMAIL, question)
     time.sleep(2)  # Rate limit protection
-    hr_result = tester.test_chat_ask("hr@test.co", question)
+    hr_result = tester.test_chat_ask(TEST_HR_EMAIL, question)
     time.sleep(2)
-    admin_result = tester.test_chat_ask("admin@sentry.local", question)
+    admin_result = tester.test_chat_ask(TEST_ADMIN_EMAIL, question)
     
     # Verify RBAC differentiation
     print("\n--- RBAC VERIFICATION ---")

@@ -11,16 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from deps import get_db, require_approved
 from schemas import ConversationOut, MessageOut, AskRequest, AskResponse
+from utils import fmt_vec
 import nim_client
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
 
 TOP_K = 5
-
-
-def _fmt_vec(v: list[float]) -> str:
-    return "[" + ",".join(f"{x:.7f}" for x in v) + "]"
 
 
 # ---------- Conversations ----------
@@ -260,7 +257,7 @@ async def ask(req: AskRequest, user: dict = Depends(require_approved), db: Async
 
     # Embed the question
     q_emb = (await nim_client.embed([req.question], input_type="query"))[0]
-    q_vec = _fmt_vec(q_emb)
+    q_vec = fmt_vec(q_emb)
 
     # RBAC-filtered retrieval (or admin bypass)
     if admin_bypass:

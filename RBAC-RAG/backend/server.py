@@ -3,8 +3,8 @@
 Environment:
 - DATABASE_URL (postgres+asyncpg://)
 - NIM_API_KEY
-- JWT_SECRET
-- ADMIN_EMAIL / ADMIN_PASSWORD (optional; auto-generates if password missing)
+- SUPABASE_URL (https://<project-ref>.supabase.co) — for JWKS token verification
+- CORS_ORIGINS (comma-separated; defaults to https://rbac-rag-nine.vercel.app)
 """
 import os
 import logging
@@ -66,7 +66,7 @@ app.include_router(api_router)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+    allow_origins=os.environ.get("CORS_ORIGINS", "https://rbac-rag-nine.vercel.app").split(","),
     allow_methods=["*"],
     allow_headers=["*"],
 )

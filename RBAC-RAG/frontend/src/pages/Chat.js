@@ -160,7 +160,7 @@ export default function Chat() {
 
   return (
     <div className="chat-shell text-slate-100">
-      <div className="h-14 shrink-0 border-b border-white/8 backdrop-blur-md bg-[hsl(var(--background))]/60 flex items-center justify-between gap-2 px-2 sm:px-4">
+      <div className="top-nav z-30 border-b border-white/8 backdrop-blur-md bg-[hsl(var(--background))]/60 flex items-center justify-between gap-2 px-2 sm:px-4">
         <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
           <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
             <SheetTrigger asChild>

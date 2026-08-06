@@ -8,7 +8,7 @@ import { cn } from '@/lib/utils';
 export function ChatSidebar({ user, conversations, activeConvId, onNew, onSelect, onDelete }) {
   return (
     <div className="flex flex-col w-full h-full min-h-0">
-      <div className="p-3 border-b border-white/8 shrink-0">
+      <div className="shrink-0 border-b border-white/8 pl-[max(0.75rem,var(--safe-left))] pr-[max(0.75rem,var(--safe-right))] pt-[max(0.75rem,var(--safe-top))] pb-3">
         <Button
           data-testid={CHAT.newConversationButton}
           onClick={onNew}
@@ -18,7 +18,7 @@ export function ChatSidebar({ user, conversations, activeConvId, onNew, onSelect
           New conversation
         </Button>
       </div>
-      <div className="flex-1 min-h-0 overflow-y-auto p-2">
+      <div className="flex-1 min-h-0 overflow-y-auto py-2 pl-[max(0.5rem,var(--safe-left))] pr-[max(0.5rem,var(--safe-right))]">
         {conversations.length === 0 ? (
           <div className="text-xs text-slate-500 px-3 py-4 font-mono">No conversations yet.</div>
         ) : (
@@ -35,7 +35,7 @@ export function ChatSidebar({ user, conversations, activeConvId, onNew, onSelect
           </ul>
         )}
       </div>
-      <div className="p-3 border-t border-white/8 shrink-0">
+      <div className="shrink-0 border-t border-white/8 pl-[max(0.75rem,var(--safe-left))] pr-[max(0.75rem,var(--safe-right))] pt-3 pb-[max(0.75rem,var(--safe-bottom))]">
         <div className="flex items-center gap-2 min-w-0">
           <div className="w-8 h-8 rounded-md bg-white/[0.04] border border-white/10 flex items-center justify-center text-xs font-mono text-slate-300 shrink-0">
             {(user?.email?.[0] || '?').toUpperCase()}

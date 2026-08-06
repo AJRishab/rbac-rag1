@@ -103,8 +103,8 @@ export default function Login() {
 export function AuthShell({ title, subtitle, children }) {
   return (
     <div className="landing-shell min-h-screen flex flex-col">
-      <nav className="border-b border-white/8 backdrop-blur-md bg-[hsl(var(--background))]/60">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 h-14 flex items-center justify-between">
+      <nav className="top-nav border-b border-white/8 backdrop-blur-md bg-[hsl(var(--background))]/60">
+        <div className="w-full max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 h-[var(--navbar-height)] flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2">
             <div className="w-7 h-7 rounded-md bg-cyan-500/15 border border-cyan-400/30 flex items-center justify-center">
               <Shield className="w-4 h-4 text-cyan-300" strokeWidth={1.75} />
