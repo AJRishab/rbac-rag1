@@ -1,3 +1,7 @@
+> **ARCHIVED.** Historical implementation plan. Superseded by `../../README.md`
+> and `../../PROJECT_STATUS.md`, which reflect the current implementation.
+> Roadmap items have been carried forward into those documents.
+
 # plan.md — Sentry RAG (Permission-aware RAG) — UPDATED (v1 COMPLETE)
 
 ## 1) Objectives

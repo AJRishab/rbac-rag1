@@ -1,6 +1,8 @@
 # Deploy free: Hugging Face Spaces + Supabase
 
-This repo is set up for a **Docker Space** that serves the React UI and FastAPI API on the same URL (port `7860`). Postgres + pgvector live on **Supabase**.
+This repo is set up for a **Docker Space** that serves the React UI and the FastAPI
+API on the same URL (port `7860`). Postgres + pgvector live on **Supabase**, and Auth
+is **Supabase Auth** (JWT, verified in the backend via JWKS).
 
 ---
 
@@ -18,12 +20,10 @@ create extension if not exists vector;
 create extension if not exists pgcrypto;
 ```
 
-Click **Run**. You should see success.
-
 ### 3. Get the connection string
 1. **Project Settings** → **Database**
 2. Under **Connection string**, choose **URI**
-3. Prefer **Session mode** pooler (port **5432**) or **Direct** connection if the pooler fails
+3. Prefer **Session mode** pooler (port 5432) or **Direct** connection if the pooler fails
 
 Copy a URI like:
 
@@ -45,153 +45,86 @@ postgresql+asyncpg://postgres.[PROJECT-REF]:[YOUR-PASSWORD]@aws-0-[REGION].poole
 ```
 
 **Important**
-- If the password has special characters (`@`, `#`, `%`, etc.), [URL-encode](https://www.urlencoder.org/) them
-- Keep this string private — you will paste it into Hugging Face **Secrets** only
+- If the password has special characters (`@`, `#`, `%`, …), [URL-encode](https://www.urlencoder.org/) them.
+- Keep this string private — you will paste it into Hugging Face **Secrets** only.
 
-Tables (`users`, `documents`, `chunks`, …) are created automatically when the Space starts.
+### 5. Tables are created automatically
+On startup the backend creates `profiles`, `documents`, `chunks`, `conversations`,
+`messages`, plus a `handle_new_user` trigger that inserts a `profiles` row when someone
+signs up via Supabase Auth. The legacy `public.users` table is **no longer created**
+(see Part B §5 if an old deployment left one behind).
 
 ---
 
 ## Part B — Hugging Face Space
 
-### 1. Push this repo to GitHub (or HF)
-You need the project remote so the Space can build from it.
+### 1. Push this repo to Git
+The Space SDK will pick up the existing `Dockerfile`.
 
-Example (from the `RBAC-RAG` folder):
+### 2. Create the Space
+- Go to [https://huggingface.co/new-space](https://huggingface.co/new-space)
+- **SDK**: Docker
+- Wait for the initial build to finish (it installs Python deps and builds the React SPA)
+
+### 3. Set the Space secrets
+
+Settings → **Variables and secrets**:
+
+| Variable | Purpose | Notes |
+|----------|---------|-------|
+| `DATABASE_URL` | Postgres connection string (asyncpg) | Required. From Part A step 4 |
+| `NIM_API_KEY` | NVIDIA NIM API key | Required |
+| `SUPABASE_URL` | `https://<project-ref>.supabase.co` | Required — backend fetches the JWKS signing key from this |
+| `REACT_APP_SUPABASE_URL` | Supabase URL (frontend build) | Required |
+| `REACT_APP_SUPABASE_ANON_KEY` | Supabase anon key (frontend build) | Required |
+| `CORS_ORIGINS` | Comma-separated origins allowed to call `/api` | Optional; defaults to `https://rbac-rag-nine.vercel.app` |
+| `REACT_APP_BACKEND_URL` | Frontend API origin | Optional; empty = same-origin `/api` in the Space |
+
+Optional overrides: `NIM_BASE_URL` (default `https://integrate.api.nvidia.com/v1`),
+`NIM_EMBED_MODEL` (default `nvidia/nv-embedqa-e5-v5`), `NIM_CHAT_MODEL`.
+
+**SSL:** no `DATABASE_SSL` variable is read by the code; `asyncpg` enables TLS
+automatically for `*.supabase.co` hostnames.
+
+### 4. Create the first admin
+Sign-up rows land in `profiles` via the trigger. Promote your account with a manual
+SQL update (there is no auto-bootstrap admin):
+
+```sql
+update public.profiles
+set role = 'admin', status = 'approved'
+where email = 'you@example.com';
+```
+
+### 5. Legacy `users` table
+If this Space was previously deployed against an old schema, drop the unused table once:
+
+```sql
+drop table if exists public.users;
+```
+
+### 6. Health check & smoke test
 
 ```bash
-git init
-git add .
-git commit -m "Prepare Hugging Face + Supabase deploy"
-# create a GitHub repo, then:
-git remote add origin https://github.com/YOUR_USER/YOUR_REPO.git
-git branch -M main
-git push -u origin main
+curl -s http://localhost:7860/api/health
+curl -s http://localhost:7860/        # expects the React SPA (HTML)
 ```
 
-Do **not** commit `.env` files (they contain secrets).
-
-### 2. Create a Docker Space
-1. Go to [https://huggingface.co/new-space](https://huggingface.co/new-space)
-2. **Space name**: e.g. `sentry-rag`
-3. **SDK**: **Docker**
-4. **Hardware**: CPU basic (free)
-5. Create the Space
-
-### 3. Connect your code
-**Option A — GitHub (easiest)**  
-Space settings → **Repository** / sync from GitHub → select your repo (root must contain `Dockerfile`).
-
-**Option B — HF git remote**
-
-```bash
-git remote add space https://huggingface.co/spaces/YOUR_HF_USER/sentry-rag
-git push space main
-```
-
-(Use a [HF access token](https://huggingface.co/settings/tokens) with write access when prompted.)
-
-### 4. Add Space secrets
-In the Space: **Settings** → **Variables and secrets** → **New secret**
-
-| Name | Value |
-|------|--------|
-| `DATABASE_URL` | Your `postgresql+asyncpg://...` string from Part A (use the service-role/owner connection — it bypasses RLS for the backend) |
-| `NIM_API_KEY` | Your NVIDIA NIM key (`nvapi-...`) |
-| `SUPABASE_URL` | `https://<project-ref>.supabase.co` — the backend fetches the project's JWKS signing key here to verify Supabase-issued tokens (`/auth/v1/.well-known/jwks.json`, ES256). |
-| `REACT_APP_SUPABASE_URL` | `https://<project-ref>.supabase.co` — needed at **frontend build** time to init `supabase-js` |
-| `REACT_APP_SUPABASE_ANON_KEY` | Your project's public **anon** key (safe to expose client-side — RLS protects the data) |
-| `CORS_ORIGINS` | Comma-separated allowed origins. Backend defaults to `https://rbac-rag-nine.vercel.app` (no wildcard) — set it to your real frontend origin(s). |
-
-Optional: `DATABASE_SSL=true` — auto-enabled when the URL contains `supabase.co`.
-
-### 5. Wait for the build
-Open the Space **Logs** / **Factory rebuild** if needed. First build installs Node + Python deps and can take **5–15 minutes**.
-
-When ready, open:
-
-```text
-https://huggingface.co/spaces/YOUR_HF_USER/sentry-rag
-```
-
-or the direct app URL shown on the Space (often `*.hf.space`).
-
-### 6. Accounts & first admin
-Auth is now handled by **Supabase Auth** (client-side via `supabase-js`), not the
-backend. New signups are `pending` with no role until an admin approves them.
-
-- **New deploy:** open the app → **Create account** → sign up with an email +
-  password. A `profiles` row is auto-created with `status = 'pending'` by the
-  `handle_new_user` trigger.
-- **Promote the first admin:** right after the first admin re-registers, run one
-  SQL statement (Supabase SQL Editor) to approve them and assign the admin role,
-  then they can approve everyone else through the admin console:
-  ```sql
-  update public.profiles set role = 'admin', status = 'approved'
-  where email = 'your-admin-email@example.com';
-  ```
-- **Existing users (re-registration migration):** the old self-hosted `users`
-  rows / bcrypt hashes can't be imported into Supabase Auth. Have each existing
-  user sign up again with a new password; the admin matches them by email in
-  `profiles` and re-approves / re-assigns their role.
-- **Email confirmation:** keep **Confirm email** disabled (Authentication →
-  Providers → Email) so login works immediately and the pending-approval flow
-  is unchanged.
-- **Legacy `users` table:** the backend now reads/writes `profiles` only. Once
-  everyone has re-registered you can drop the old table (`drop table if exists
-  public.users;`). `SCHEMA_SQL` recreates an empty `users` table on startup
-  unless its block is later removed from `backend/database.py`.
-
-Health check: `https://YOUR-SPACE-URL/api/health` → `{"status":"ok"}`
+**Serving note:** the backend serves the React build from `FRONTEND_BUILD_DIR`
+(the Space Dockerfile sets it to `/app/frontend_build`). Static assets under
+`public/` (like `.well-known/`) are **not** served by that static handler — put those
+files on the platform that fronts the domain (e.g. Vercel) instead.
 
 ---
 
-## How this deploy works
+## Optional — deploying the frontend separately (Vercel)
 
-| Layer | Where |
-|--------|--------|
-| Auth / sessions | **Supabase Auth** (client-side `supabase-js`; backend verifies its JWT) |
-| React UI | Built in Docker, served by FastAPI |
-| FastAPI `/api/*` | Same Space container (port **7860**) |
-| Postgres + pgvector | **Supabase** (RLS enabled, zero policies — backend uses the service-role connection) |
-| Embeddings + chat | **NVIDIA NIM** (your API key) |
+You can run the SPA on Vercel and point `REACT_APP_BACKEND_URL` at the Space:
 
-Same-origin means the browser calls `/api/...` on the Space URL — no separate frontend host.
-
----
-
-## Local check before pushing (optional)
-
-With Docker Desktop running:
-
-```bash
-cd RBAC-RAG
-docker build -t sentry-rag .
-docker run --rm -p 7860:7860 \
-  -e DATABASE_URL="postgresql+asyncpg://..." \
-  -e NIM_API_KEY="nvapi-..." \
-  -e SUPABASE_URL="https://<project-ref>.supabase.co" \
-  -e REACT_APP_SUPABASE_URL="https://<project-ref>.supabase.co" \
-  -e REACT_APP_SUPABASE_ANON_KEY="<anon-key>" \
-  sentry-rag
-```
-
-Open http://localhost:7860
-
----
-
-## Free-tier gotchas
-
-1. **Supabase** pauses after ~7 days of inactivity — open the project or hit the app to wake it
-2. **HF Spaces** free CPU can sleep / be slow on cold start
-3. **NIM** free tier rate-limits (~40 req/min) — large PDF uploads embed in batches and may need a pause/retry
-4. Never put secrets in the README or commit `.env`
-
----
-
-## Files added for this deploy
-
-- `Dockerfile` — builds frontend + runs uvicorn on 7860  
-- `requirements-space.txt` — slim Python deps for the Space  
-- `.dockerignore` — keeps the image smaller  
-- `README.md` — HF Space metadata (`sdk: docker`, `app_port: 7860`)
+1. Vercel → **Add New…** → **Project** → import this repo.
+2. Framework preset: **Create React App**; root directory `RBAC-RAG/frontend`.
+3. Build command `npm run build`; output directory `build`.
+4. Set Vercel env vars: `REACT_APP_BACKEND_URL` (the Space URL, e.g.
+   `https://<space-name>.hf.space`), `REACT_APP_SUPABASE_URL`,
+   `REACT_APP_SUPABASE_ANON_KEY`.
+5. Allow that origin in the Space `CORS_ORIGINS`.

@@ -1,3 +1,6 @@
+> **ARCHIVED.** Historical hygiene-audit snapshot (findings have since been
+> addressed in code). Current status lives in `../../PROJECT_STATUS.md`.
+
 # Sentry RAG — Codebase Audit Findings
 
 Scope: `RBAC-RAG/backend/` and `RBAC-RAG/frontend/src/`. Skipped `node_modules/`,
