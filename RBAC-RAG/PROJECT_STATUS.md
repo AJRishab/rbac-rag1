@@ -39,9 +39,13 @@ app**. The older "allow-all" prototype presented in the original README is histo
 - **NIM client** (`nim_client.py`): lazy client init, retry + 429 handling,
   `embed()`, `chat()`, `suggest_chunk_roles()` (single batched LLM call sized by
   `NIM_CHUNK_ROLE_BATCH_CHARS`, falls back to the doc's candidate roles on error).
-- **RBAC retrieval** (in `chat_router`): top-5 cosine search filtered by the
-  caller's role (`allowed_roles && ARRAY[:role]`), admins bypass the filter;
-  a parallel (unfiltered) top-k query measures blocked chunks for display.
+- **Hybrid retrieval + rerank** (in `retrieval.py` + `reranker.py`, wired via
+  `chat_router`): dense pgvector cosine `AND` in-process `rank_bm25` lexical legs,
+  **both RBAC-filtered inside SQL** (`allowed_roles && ARRAY[:role]`, admins bypass),
+  fused with RRF, then a NIM cross-encoder reranker narrows top-20 → top-k. A
+  post-fusion `assert_rbac()` defense-in-depth check raises loudly if an
+  unauthorized chunk ever reaches memory; `retrieval_detail` records
+  `dense_rank`/`lexical_rank`/`rrf_score`/`rerank_score`/`rerank_rank`.
 - **Admin CRUD** (`admin_router`): users list/approve/role; documents
   list/upload/chunks/publish/`reset-chunk-roles`/delete; per-chunk `PATCH`
   to edit `allowed_roles`.
@@ -62,7 +66,7 @@ Do not change the pytest `addopts`. Run `pytest` from `backend/`.
 | Area | Gap | Impact | Likely fix |
 |---|---|---|---|
 | Vector index | No tuned HNSW/IVFFlat index; plain pgvector `<=>` search | Slow at large corpus | Add HNSW index after bulk ingest |
-| Retrieval | Naive top-k cosine only | Quality drops on huge corpora | Hybrid (BM25 + semantic) + reranker |
+| Retrieval | Hybrid (dense + BM25 + RRF) built; no tuned BM25/vector params tuned to the corpus, no top-k slider | Quality/param tuning | Calibrate `DENSE_K`/`LEXICAL_K`/`RRF_K`, optional top-k slider in UI |
 | Streaming | Chat response is non-streamed | UX | SSE/websocket on `/ask` |
 | Rate limiting | No per-user/NIM request quotas | Cost runaway | Token-bucket limiter on `/api/chat/*` |
 | Admin audit log | `allowed_roles` edits are not logged | No compliance trail | `document_audit_log` table |
@@ -75,8 +79,8 @@ Do not change the pytest `addopts`. Run `pytest` from `backend/`.
 
 1. **stability first**: add HNSW index, rate limiting, and audit logging on admin
    role edits.
-2. **retrieve smarter**: hybrid retrieval (BM25 + embeddings), optional top-k
-   slider, and a reranker (e.g. `bge-reranker` via NIM).
+2. **retrieve smarter**: calibrate fusion params (`DENSE_K`/`LEXICAL_K`/`RRF_K`) on
+   real data and add an optional top-k slider; consider HNSW for larger corpora.
 3. **streaming answers** and chunk-level citations-to-source links in the UI.
 4. **Admin polish**: pagination for large docs, per-document role → chunk
    bulk (the "apply doc roles to all chunks" convenience), and CSV user export.

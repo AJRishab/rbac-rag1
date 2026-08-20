@@ -36,6 +36,22 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("Sentry RAG - initializing database and seeding admin...")
     await init_db()
+
+    # Loud, non-fatal reranker health check at boot: a misconfigured
+    # NIM_RERANK_MODEL or wrong reranker host/model should be visible in the
+    # startup logs immediately, not discovered via silent RRF-degraded answers.
+    if os.environ.get("RERANK_PROBE_ON_STARTUP", "true").lower() not in {"0", "false", "no"}:
+        ok, detail = await nim_client.probe_reranker()
+        if ok:
+            logger.info("NIM reranker health check OK (model=%s @ %s)",
+                        nim_client.NIM_RERANK_MODEL, nim_client.NIM_RERANK_ENDPOINT)
+        else:
+            logger.error(
+                "NIM reranker health check FAILED — reranking will fall back to RRF order. "
+                "model=%s endpoint=%s. %s",
+                nim_client.NIM_RERANK_MODEL, nim_client.NIM_RERANK_ENDPOINT, detail,
+            )
+
     logger.info("Sentry RAG - startup complete")
     yield
     logger.info("Sentry RAG - shutdown")

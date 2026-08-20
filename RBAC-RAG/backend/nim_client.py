@@ -20,6 +20,39 @@ logger = logging.getLogger(__name__)
 NIM_BASE_URL = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 NIM_EMBED_MODEL = os.environ.get("NIM_EMBED_MODEL", "nvidia/nv-embedqa-e5-v5")
 NIM_CHAT_MODEL = os.environ.get("NIM_CHAT_MODEL", "meta/llama-3.1-8b-instruct")
+# NIM reranker. Verified live against a real call:
+#   POST https://ai.api.nvidia.com/v1/retrieval/nvidia/reranking  (HTTP 200)
+#   model: nv-rerank-qa-mistral-4b:1  (short name + ":1" version suffix —
+#          NOT the long-form "nvidia/rerank-qa-mistral-4b")
+#   response: {"rankings":[{"index": N, "logit": <float>}, ...]} — the score
+#   field is `logit` (a raw cross-entropy logit; monotonic with relevance),
+#   which rerank() parses below.
+NIM_RERANK_MODEL = os.environ.get("NIM_RERANK_MODEL", "nv-rerank-qa-mistral-4b:1")
+
+# Base HOST of the reranker endpoint. The reranker is served from a DIFFERENT
+# host (ai.api.nvidia.com) than the chat/embed NIM_BASE_URL
+# (integrate.api.nvidia.com), so this must NOT derive from or fall back to it.
+# The canonical rerank path is appended in `_rerank_endpoint()` below and is
+# de-duplicated, so you may set either a bare host
+# (https://ai.api.nvidia.com) or a full endpoint URL.
+NIM_RERANK_BASE_URL = (
+    os.environ.get("NIM_RERANK_BASE_URL")
+    or "https://ai.api.nvidia.com"
+).rstrip("/")
+# Canonical rerank route appended to NIM_RERANK_BASE_URL.
+NIM_RERANK_PATH = "/v1/retrieval/nvidia/reranking"
+
+
+def _rerank_endpoint() -> str:
+    base = NIM_RERANK_BASE_URL.rstrip("/")
+    if base.endswith(NIM_RERANK_PATH):
+        return base
+    return base + NIM_RERANK_PATH
+
+
+# Full URL the client POSTs to (computed once so logs show the real target).
+NIM_RERANK_ENDPOINT: str = _rerank_endpoint()
+
 
 # Explicitly initialized on all code paths.
 _client: httpx.AsyncClient | None = None
@@ -183,6 +216,97 @@ async def chat(system: str, user: str, max_tokens: int = 700, temperature: float
         },
     )
     return data["choices"][0]["message"]["content"]
+
+
+async def rerank(query: str, documents: list[str], top_n: int = 50) -> list[dict]:
+    """Rerank documents against a query via the NIM reranking endpoint.
+
+    POSTs to ``NIM_RERANK_ENDPOINT`` (``NIM_RERANK_BASE_URL`` + the canonical
+    rerank route ``/v1/retrieval/nvidia/reranking``, de-duplicated). The
+    reranker host differs from ``NIM_BASE_URL`` and is NOT derived from it.
+    The model is the short name + version, e.g. ``nv-rerank-qa-mistral-4b:1``.
+
+    The live response is ``{"rankings":[{"index": N, "logit": <float>}, ...]}``:
+    the score field is ``logit`` (a raw cross-entropy logit, monotonic with
+    relevance). ``relevance_score``/``score``/``logprob`` are also accepted so
+    the parser works across deployments; any unrecognized shape raises loudly
+    so a misconfigured key/model degrades instead of silently returning RRF order.
+
+    .. code-block:: json
+
+        {
+          "model": "nv-rerank-qa-mistral-4b:1",
+          "query": {"text": "<question>"},
+          "passages": [{"text": "<chunk 1>"}, {"text": "<chunk 2>"}],
+          "truncate": "END"
+        }
+
+    Returns ``[{"index": int, "relevance_score": float}]`` sorted by score
+    descending, truncated to ``top_n``. ``index`` is the position in
+    ``documents`` so the caller can map scores back onto chunks.
+    """
+    if not documents:
+        return []
+    data = await _request_with_retry(
+        "POST",
+        NIM_RERANK_ENDPOINT,
+        json_body={
+            "model": NIM_RERANK_MODEL,
+            "query": {"text": query},
+            "passages": [{"text": doc} for doc in documents],
+            "truncate": "END",
+        },
+    )
+
+    # Expected (live, verified): {"rankings": [{"index": N, "logit": <float>}, ...]}.
+    # The score key varies by deployment; accept in priority order
+    # relevance_score -> score -> logprob -> logit. Fail LOUDLY on any
+    # unexpected shape instead of silently returning nothing and degrading.
+    rankings = data.get("rankings")
+    if not isinstance(rankings, list):
+        raise RuntimeError(
+            f"NIM ranking response has no 'rankings' list (model={NIM_RERANK_MODEL}): "
+            f"{str(data)[:400]}"
+        )
+    scored: list[dict] = []
+    for item in rankings:
+        if not isinstance(item, dict) or "index" not in item:
+            raise RuntimeError(
+                f"NIM ranking item missing 'index' key (model={NIM_RERANK_MODEL}): {item!r}"
+            )
+        score_value = item.get(
+            "relevance_score",
+            item.get("score", item.get("logprob", item.get("logit"))),
+        )
+        if score_value is None:
+            raise RuntimeError(
+                f"NIM ranking item has no score/logprob/logit/relevance_score key "
+                f"(model={NIM_RERANK_MODEL}): {item!r}"
+            )
+        try:
+            scored.append({"index": int(item["index"]), "relevance_score": float(score_value)})
+        except (TypeError, ValueError):
+            raise RuntimeError(
+                f"NIM ranking item index/score not numeric (model={NIM_RERANK_MODEL}): {item!r}"
+            )
+    scored.sort(key=lambda x: x["relevance_score"], reverse=True)
+    return scored[:top_n]
+
+
+async def probe_reranker() -> tuple[bool, str]:
+    """Validate the NIM reranker endpoint + NIM_RERANK_MODEL with a minimal call
+    (live target: ai.api.nvidia.com/v1/retrieval/nvidia/reranking).
+
+    Returns ``(ok, detail)`` and never raises, so callers (e.g. the startup
+    health check) can log the outcome loudly without crashing the app.
+    """
+    try:
+        out = await rerank("probe", ["probe"], top_n=1)
+        if not out:
+            return False, "ranking call returned no results"
+        return True, "ok"
+    except Exception as exc:  # noqa: BLE001 - probe reports, never raises
+        return False, getattr(exc, "detail", None) or str(exc)
 
 
 def _parse_role_suggestions(response: str, expected_count: int, candidate_roles: list[str]) -> list[list[str] | None]:

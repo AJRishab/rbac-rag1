@@ -13,6 +13,11 @@ from deps import get_db, require_approved
 from schemas import ConversationOut, MessageOut, AskRequest, AskResponse
 from utils import fmt_vec
 import nim_client
+from retrieval import (
+    hybrid_retrieve, assert_rbac, RetrievedChunk,
+    DENSE_K, LEXICAL_K, FUSE_K, RRF_K,
+)
+from reranker import rerank, RERANK_TOP_N
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
@@ -113,86 +118,43 @@ async def _insert_user_message(db: AsyncSession, conv_id: str, question: str):
     return row
 
 
-async def _retrieve_admin(db: AsyncSession, q_vec: str):
-    rows = (await db.execute(
-        text(
-            "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.content, c.allowed_roles, "
-            "d.title AS doc_title, d.filename AS source, (c.embedding <=> CAST(:q AS vector)) AS distance "
-            "FROM chunks c JOIN documents d ON d.id = c.document_id "
-            "ORDER BY c.embedding <=> CAST(:q AS vector) LIMIT :k"
-        ),
-        {"q": q_vec, "k": TOP_K},
-    )).fetchall()
-    return rows, []  # no blocked list for admin bypass
-
-
-async def _retrieve_role_filtered(db: AsyncSession, q_vec: str, role: str):
-    """RBAC-filtered retrieval with the role check INSIDE the SQL query."""
-    rows = (await db.execute(
-        text(
-            "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.content, c.allowed_roles, "
-            "d.title AS doc_title, d.filename AS source, (c.embedding <=> CAST(:q AS vector)) AS distance "
-            "FROM chunks c JOIN documents d ON d.id = c.document_id "
-            "WHERE d.status = 'published' AND c.allowed_roles && :r "
-            "ORDER BY c.embedding <=> CAST(:q AS vector) LIMIT :k"
-        ),
-        {"q": q_vec, "r": [role], "k": TOP_K},
-    )).fetchall()
-
-    unfiltered = (await db.execute(
-        text(
-            "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.allowed_roles, "
-            "d.title AS doc_title, d.filename AS source "
-            "FROM chunks c JOIN documents d ON d.id = c.document_id "
-            "WHERE d.status = 'published' "
-            "ORDER BY c.embedding <=> CAST(:q AS vector) LIMIT :k"
-        ),
-        {"q": q_vec, "k": TOP_K},
-    )).fetchall()
-    kept_ids = {r.chunk_id for r in rows}
-    blocked = [
-        {
-            "document_id": str(r.document_id),
-            "title": r.doc_title,
-            "source": r.source,
-            "page": r.source_page,
-            "chunk_id": r.chunk_id,
-            "chunk_index": r.chunk_index,
-            "allowed_roles": list(r.allowed_roles or []),
-            "reason": "role_mismatch",
-        }
-        for r in unfiltered
-        if r.chunk_id not in kept_ids
-    ]
-    return rows, blocked
-
-
-def _build_citations_and_details(rows):
+def _build_citations_and_details(rows: list[RetrievedChunk]):
     citations = []
     seen_titles = set()
     retrieved_details = []
-    for r in rows:
-        title = r.doc_title
+    for c in rows:
+        title = c.title
         if title not in seen_titles:
             seen_titles.add(title)
             citations.append({
-                "document_id": str(r.document_id), "title": title, "source": r.source,
-                "page": r.source_page, "chunk_id": r.chunk_id, "chunk_index": r.chunk_index,
+                "document_id": c.document_id, "title": title, "source": c.source,
+                "page": c.page, "chunk_id": c.id, "chunk_index": c.chunk_index,
             })
-        retrieved_details.append({
-            "document_id": str(r.document_id),
+        detail = {
+            "document_id": c.document_id,
             "title": title,
-            "source": r.source,
-            "page": r.source_page,
-            "chunk_id": r.chunk_id,
-            "chunk_index": r.chunk_index,
-            "allowed_roles": list(r.allowed_roles or []),
-            "distance": float(r.distance),
-        })
+            "source": c.source,
+            "page": c.page,
+            "chunk_id": c.id,
+            "chunk_index": c.chunk_index,
+            "allowed_roles": list(c.allowed_roles or []),
+        }
+        if c.distance is not None:
+            detail["distance"] = c.distance
+        if c.dense_rank is not None:
+            detail["dense_rank"] = c.dense_rank
+        if c.lexical_rank is not None:
+            detail["lexical_rank"] = c.lexical_rank
+        detail["rrf_score"] = c.rrf_score
+        if c.rerank_score is not None:
+            detail["rerank_score"] = c.rerank_score
+        if c.rerank_rank is not None:
+            detail["rerank_rank"] = c.rerank_rank
+        retrieved_details.append(detail)
     return citations, retrieved_details
 
 
-async def _generate_answer(rows, question: str, admin_bypass: bool) -> str:
+async def _generate_answer(rows: list[RetrievedChunk], question: str, admin_bypass: bool) -> str:
     if not rows:
         return (
             "I don't have any documents in the knowledge base yet."
@@ -200,8 +162,8 @@ async def _generate_answer(rows, question: str, admin_bypass: bool) -> str:
             else "I don't have documents that your role is allowed to see for this question."
         )
     context = "\n\n".join(
-        f"[Source #{i + 1}: {r.source}; page {r.source_page or 'unknown'}; chunk {r.chunk_id}]\n{r.content}"
-        for i, r in enumerate(rows)
+        f"[Source #{i + 1}: {c.source}; page {c.page or 'unknown'}; chunk {c.id}]\n{c.content}"
+        for i, c in enumerate(rows)
     )
     system_prompt = (
         "You are SENTRY/RAG, a permission-aware assistant. Answer the user's question "
@@ -259,25 +221,35 @@ async def ask(req: AskRequest, user: dict = Depends(require_approved), db: Async
     q_emb = (await nim_client.embed([req.question], input_type="query"))[0]
     q_vec = fmt_vec(q_emb)
 
-    # RBAC-filtered retrieval (or admin bypass)
-    if admin_bypass:
-        retrieved_rows, blocked_details = await _retrieve_admin(db, q_vec)
-    else:
-        retrieved_rows, blocked_details = await _retrieve_role_filtered(db, q_vec, role)
+    # Hybrid retrieval: dense (pgvector) + BM25 lexical + RRF fusion, with RBAC
+    # pre-filtered inside SQL on both legs (admin bypass skips that filter).
+    fused, blocked = await hybrid_retrieve(db, q_vec, req.question, role, admin_bypass)
 
-    citations, retrieved_details = _build_citations_and_details(retrieved_rows)
-    retrieved_count = len(retrieved_rows)
-    blocked_count = len(blocked_details)
+    # Defense-in-depth: never expected to fire (real enforcement is in SQL).
+    assert_rbac(fused, role, admin_bypass)
+
+    # Rerank the fused candidates down to the final TOP_K sent to the LLM.
+    ranked = await rerank(fused, req.question)
+    final_rows = ranked[:TOP_K]
+
+    citations, retrieved_details = _build_citations_and_details(final_rows)
+    retrieved_count = len(final_rows)
+    blocked_count = len(blocked)
 
     # Generate answer
-    answer = await _generate_answer(retrieved_rows, req.question, admin_bypass)
+    answer = await _generate_answer(final_rows, req.question, admin_bypass)
 
     retrieval_detail = {
         "retrieved": retrieved_details,
-        "blocked": blocked_details,
+        "blocked": blocked,
         "role": role,
         "admin_bypass": admin_bypass,
         "top_k": TOP_K,
+        "pipeline": {
+            "dense_k": DENSE_K, "lexical_k": LEXICAL_K,
+            "fuse_k": FUSE_K, "rrf_k": RRF_K,
+            "rerank_top_n": RERANK_TOP_N,
+        },
     }
 
     asst_row = await _persist_assistant_message(
