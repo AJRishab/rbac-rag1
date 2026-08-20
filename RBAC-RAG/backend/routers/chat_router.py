@@ -16,6 +16,7 @@ import nim_client
 from retrieval import (
     hybrid_retrieve, assert_rbac, RetrievedChunk,
     DENSE_K, LEXICAL_K, FUSE_K, RRF_K,
+    is_inventory_question, list_documents, format_document_inventory,
 )
 from reranker import rerank, RERANK_TOP_N
 
@@ -171,7 +172,16 @@ async def _generate_answer(rows: list[RetrievedChunk], question: str, admin_bypa
         "when page metadata is available, otherwise use (Source: filename, chunk ID). "
         "If the sources don't contain the answer, respond exactly: "
         "'I don't have documents that answer this question.' Do not use general knowledge. "
-        "Do not make up sources."
+        "Do not make up sources. "
+        "\n\nDEFENSE-IN-DEPTH SOURCE RULES — follow strictly: "
+        "\n- The ONLY valid document/source identities are the filenames given explicitly in the "
+        "[Source #N: filename; ...] headers above. A document is 'in the knowledge base' only if "
+        "its own header appears in this context — never name documents or report titles that happen "
+        "to appear as TEXT inside a source's content; those are merely content the source discusses. "
+        "\n- Do NOT list, enumerate, or summarize documents by names found only within chunk text "
+        "(e.g. references/further-reading sections). Those are not retrieved sources. "
+        "\n- When asked what documents are in the knowledge base, list ONLY the filenames from the "
+        "provided [Source #N: ...] headers — never text extracted from within the chunks."
     )
     user_prompt = f"Question: {question}\n\nSources:\n{context}"
     return await nim_client.chat(system_prompt, user_prompt, max_tokens=700, temperature=0.2)
@@ -216,6 +226,46 @@ async def ask(req: AskRequest, user: dict = Depends(require_approved), db: Async
 
     conv_id = await _ensure_conversation(db, user["id"], req.conversation_id, req.question)
     user_row = await _insert_user_message(db, conv_id, req.question)
+
+    # Corpus-inventory questions ("what documents are in the knowledge base")
+    # cannot be answered by RAG chunk retrieval — top-K similarity only returns
+    # fragments of whatever chunk matches, never a true corpus inventory.
+    # Route them to a direct, RBAC-filtered documents query instead — BEFORE any
+    # embedding / retrieval / reranking, so inventory questions never hit NIM.
+    if is_inventory_question(req.question):
+        docs = await list_documents(db, role, admin_bypass)
+        answer = format_document_inventory(docs, role)
+        retrieval_detail = {
+            "retrieved": [],
+            "blocked": [],
+            "role": role,
+            "admin_bypass": admin_bypass,
+            "top_k": TOP_K,
+            "pipeline": {
+                "mode": "corpus_inventory",
+                "dense_k": DENSE_K, "lexical_k": LEXICAL_K,
+                "fuse_k": FUSE_K, "rrf_k": RRF_K,
+                "rerank_top_n": RERANK_TOP_N,
+            },
+            "document_count": len(docs),
+        }
+        asst_row = await _persist_assistant_message(
+            db, conv_id, answer, [], 0, 0, retrieval_detail,
+        )
+        return AskResponse(
+            conversation_id=conv_id,
+            user_message=MessageOut(
+                id=str(user_row.id), role="user", content=user_row.content,
+                citations=None, retrieved_count=None, blocked_count=None,
+                retrieval_detail=None, created_at=user_row.created_at,
+            ),
+            assistant_message=MessageOut(
+                id=str(asst_row.id), role="assistant", content=asst_row.content,
+                citations=asst_row.citations, retrieved_count=asst_row.retrieved_count,
+                blocked_count=asst_row.blocked_count, retrieval_detail=asst_row.retrieval_detail,
+                created_at=asst_row.created_at,
+            ),
+        )
 
     # Embed the question
     q_emb = (await nim_client.embed([req.question], input_type="query"))[0]

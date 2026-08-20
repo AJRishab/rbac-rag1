@@ -240,6 +240,148 @@ def _rrf_fuse(
     )[:fuse_k]
 
 
+
+_DOC_NOUN = r"document|documents|file|files|item|items|source|sources|paper|papers|report|reports|publication|publications|title|titles"
+_DOC_KB = r"knowledge\s*base|\bkb\b|corpus|system|the\s+library|the\s+collection|database|rag|the\s+project|the\s+application|app|index|archive"
+
+_DOC_NOUN_RE = re.compile(_DOC_NOUN, re.IGNORECASE)
+_DOC_KB_RE = re.compile(_DOC_KB, re.IGNORECASE)
+
+
+def is_inventory_question(text: str) -> bool:
+    """True if `text` is a corpus-inventory question ("what documents are in
+    the knowledge base?", "list the files in this system", "KB documents", ...).
+
+    Routed to the direct `documents` query path instead of RAG chunk retrieval,
+    because top-K similarity search over chunks can never produce a true
+    corpus inventory — it can only return fragments of the matching chunk(s).
+
+    Detection is a **two-independent-set AND**: the query must contain
+    (1) a document-type noun AND (2) an explicit corpus-level anchor
+    ("knowledge base" / "kb" / "the system" / ...). Both must be present, in
+    any order, with no inventory verb required (so noun-only phrasings like
+    "KB documents available" still classify).
+
+    This avoids the two failure modes of RAG on such questions:
+      * false positives on content questions that merely use "documents"
+        (e.g. "how many documents mention the Mendoza Review" — has the noun
+        but no anchor, so it correctly stays on the RAG path);
+      * false positives on conceptual queries ("what is in the knowledge base")
+        — has the anchor but no document noun, so stays on the RAG path.
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    if not _DOC_NOUN_RE.search(t):
+        return False
+    if not _DOC_KB_RE.search(t):
+        return False
+    return True
+
+
+async def list_documents(db: AsyncSession, role: str | None, admin_bypass: bool = False) -> list[dict]:
+    """RBAC-filtered corpus inventory, queried directly from `documents`.
+
+    Mirrors the RBAC contract in :func:`_dense_retrieve` exactly:
+    non-admin callers are restricted in SQL to ``status = 'published'`` AND
+    ``allowed_roles && ARRAY[:role]``; admin bypass drops the filter so the
+    caller sees every document regardless of status/role.
+
+    Returns dicts with title (falling back to filename when title is empty),
+    filename, status, allowed_roles — the fields needed to answer inventory
+    questions without ever touching chunks or the LLM.
+    """
+    if admin_bypass:
+        sql = (
+            "SELECT id, title, filename, status, allowed_roles "
+            "FROM documents "
+            "ORDER BY title NULLS LAST, filename"
+        )
+        result = await db.execute(text(sql))
+    else:
+        sql = (
+            "SELECT id, title, filename, status, allowed_roles "
+            "FROM documents "
+            "WHERE status = 'published' "
+            "  AND allowed_roles && ARRAY[:role] "
+            "ORDER BY title NULLS LAST, filename"
+        )
+        result = await db.execute(text(sql), {"role": role})
+    rows = result.fetchall()
+    out: list[dict] = []
+    for r in rows:
+        title = (r.title or "").strip() or r.filename
+        out.append({
+            "id": str(r.id),
+            "title": title,
+            "filename": r.filename,
+            "status": r.status,
+            "allowed_roles": list(r.allowed_roles or []),
+        })
+    return out
+
+
+def format_document_inventory(docs: list[dict], role: str | None) -> str:
+    """Format inventory rows into a grounded, RBAC-correct answer string."""
+    if not docs:
+        return "No documents are currently available to you in the knowledge base."
+    lines = [f"- {d['title']}" for d in docs]
+    header = "Documents available to you in the knowledge base:"
+    return f"{header}\n" + "\n".join(lines)
+
+
+
+async def list_documents(db: AsyncSession, role: str | None, admin_bypass: bool = False) -> list[dict]:
+    """RBAC-filtered corpus inventory, queried directly from `documents`.
+
+    Mirrors the RBAC contract in :func:`_dense_retrieve` exactly:
+    non-admin callers are restricted in SQL to ``status = 'published'`` AND
+    ``allowed_roles && ARRAY[:role]``; admin bypass drops the filter so the
+    caller sees every document regardless of status/role.
+
+    Returns dicts with title (falling back to filename when title is empty),
+    filename, status, allowed_roles — the fields needed to answer inventory
+    questions without ever touching chunks or the LLM.
+    """
+    if admin_bypass:
+        sql = (
+            "SELECT id, title, filename, status, allowed_roles "
+            "FROM documents "
+            "ORDER BY title NULLS LAST, filename"
+        )
+        result = await db.execute(text(sql))
+    else:
+        sql = (
+            "SELECT id, title, filename, status, allowed_roles "
+            "FROM documents "
+            "WHERE status = 'published' "
+            "  AND allowed_roles && ARRAY[:role] "
+            "ORDER BY title NULLS LAST, filename"
+        )
+        result = await db.execute(text(sql), {"role": role})
+    rows = result.fetchall()
+    out: list[dict] = []
+    for r in rows:
+        title = (r.title or "").strip() or r.filename
+        out.append({
+            "id": str(r.id),
+            "title": title,
+            "filename": r.filename,
+            "status": r.status,
+            "allowed_roles": list(r.allowed_roles or []),
+        })
+    return out
+
+
+def format_document_inventory(docs: list[dict], role: str | None) -> str:
+    """Format inventory rows into a grounded, RBAC-correct answer string."""
+    if not docs:
+        return "No documents are currently available to you in the knowledge base."
+    lines = [f"- {d['title']}" for d in docs]
+    header = "Documents available to you in the knowledge base:"
+    return f"{header}\n" + "\n".join(lines)
+
+
 def assert_rbac(chunks: list[RetrievedChunk], role: str | None, admin_bypass: bool = False) -> None:
     """Defense-in-depth check — never expected to fire.
 
