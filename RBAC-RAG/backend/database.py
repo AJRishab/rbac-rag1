@@ -92,32 +92,41 @@ SCHEMA_SQL = [
 
 
 def _split_sql(sql: str) -> list[str]:
-    """Split a SQL script into statements, respecting `$$...$$` and '...' blocks."""
+    """Split a SQL script into statements, respecting `$tag$...$tag$`, '...' and -- blocks."""
     statements: list[str] = []
     current: list[str] = []
-    in_dollar = False
+    in_dollar: str | None = None  # the active dollar-quote tag, e.g. "$$" or "$function$"
     in_squote = False
     i = 0
     n = len(sql)
     while i < n:
         # SQL `--` line comment (outside strings / dollar quotes): skip to EOL so
         # apostrophes inside comments can't corrupt single-quote state.
-        if not in_squote and not in_dollar and sql[i:i + 2] == "--":
-            while i < n and sql[i] != "\n":
-                i += 1
+        if not in_squote and in_dollar is None and sql.startswith("--", i):
+            eol = sql.find("\n", i)
+            i = n if eol == -1 else eol + 1
             continue
-        if not in_squote and sql[i:i + 2] == "$$":
-            in_dollar = not in_dollar
-            current.append("$$")
-            i += 2
-            continue
+        # Dollar-quote opener/closer: `$tag$` where tag is empty or [A-Za-z0-9_]+
+        if not in_squote and sql[i] == "$":
+            j = sql.find("$", i + 1)
+            if j != -1:
+                tag = sql[i:j + 1]
+                body = tag[1:-1]
+                if body == "" or all(c.isalnum() or c == "_" for c in body):
+                    if in_dollar is None:
+                        in_dollar = tag
+                    elif in_dollar == tag:
+                        in_dollar = None
+                    current.append(tag)
+                    i = j + 1
+                    continue
         ch = sql[i]
-        if ch == "'" and not in_dollar:
+        if ch == "'" and in_dollar is None:
             in_squote = not in_squote
             current.append(ch)
             i += 1
             continue
-        if ch == ";" and not in_dollar and not in_squote:
+        if ch == ";" and in_dollar is None and not in_squote:
             stmt = "".join(current).strip()
             if stmt:
                 statements.append(stmt)
@@ -147,14 +156,14 @@ async def init_db():
         # Supabase Auth migration: profiles, new-user trigger, FK repoint, RLS.
         # Idempotent. Statements run individually so a plain Postgres dev DB
         # (no Supabase auth schema) skips only the auth-dependent ones.
-        migration_path = Path(__file__).parent / "migrations" / "001_supabase_auth.sql"
-        if migration_path.is_file():
+        migrations_dir = Path(__file__).parent / "migrations"
+        for migration_path in sorted(migrations_dir.glob("*.sql")):
             migration_sql = migration_path.read_text(encoding="utf-8")
             for stmt in _split_sql(migration_sql):
                 try:
                     await conn.execute(text(stmt))
                 except Exception as exc:  # e.g. no auth.users on plain Postgres
                     logger.warning(
-                        "Supabase auth migration statement skipped (%s): %s",
-                        type(exc).__name__, exc,
+                        "%s skipped (%s): %s",
+                        migration_path.name, type(exc).__name__, exc,
                     )
