@@ -331,55 +331,272 @@ def format_document_inventory(docs: list[dict], role: str | None) -> str:
 
 
 
-async def list_documents(db: AsyncSession, role: str | None, admin_bypass: bool = False) -> list[dict]:
-    """RBAC-filtered corpus inventory, queried directly from `documents`.
+# ==== Document-summary intent detection + safe document resolution ====
+# A third scope alongside `corpus_inventory` and normal hybrid RAG: asking for
+# a summary/overview of ONE named document. This cannot be answered by global
+# top-K chunk similarity (which returns the K most relevant fragments, not
+# broad document coverage), so it is resolved against `documents` metadata and
+# then scoped to that single document's chunks - with RBAC enforced INSIDE each
+# SQL query (never fetch-then-filter in Python).
 
-    Mirrors the RBAC contract in :func:`_dense_retrieve` exactly:
-    non-admin callers are restricted in SQL to ``status = 'published'`` AND
-    ``allowed_roles && ARRAY[:role]``; admin bypass drops the filter so the
-    caller sees every document regardless of status/role.
+_RE_SUMMARY_INTENT = re.compile(
+    r"(?:"
+    r"summari[sz]e|summari[sz]ing|summar[sy]|overview|\btl;?dr\b|\bgist\b|"
+    r"key\s+points?|main\s+(?:points?|ideas?|takeaways?)|"
+    r"what(?:'s|\s+is)\s+this\s+(?:document|report|pdf|file|paper|doc)(?:\s+about)?"
+    r")",
+    re.IGNORECASE,
+)
 
-    Returns dicts with title (falling back to filename when title is empty),
-    filename, status, allowed_roles — the fields needed to answer inventory
-    questions without ever touching chunks or the LLM.
+_RE_REF_FILENAME = re.compile(
+    r"\b([A-Za-z0-9][A-Za-z0-9._-]*\.(?:pdf|docx?|txt|md|markdown))\b",
+    re.IGNORECASE,
+)
+_RE_REF_NUMERIC = re.compile(r"\b(\d{2,})\b")
+_RE_REF_GENERIC = re.compile(
+    r"\b(?:the|this|that)\s+(?:report|document|pdf|file|paper|doc)\b|\b(?:it|this)\b",
+    re.IGNORECASE,
+)
+_EXT_RE = re.compile(r"\.(?:pdf|docx?|txt|md|markdown)$")
+
+
+def _slug(value: str) -> str:
+    """Lowercase + collapse non-alphanumerics to single '-' separators."""
+    return re.sub(r"[^a-z0-9]+", "-", (value or "").lower()).strip("-")
+
+
+def _norm_filename(value: str) -> str:
+    """Filename normalization for matching: lowercase, strip extension, slugify."""
+    return _slug(_EXT_RE.sub("", (value or "").strip().lower()))
+
+
+def _numeric_ids(value: str) -> set[int]:
+    """Numeric 'identifier' tokens from a filename/title/ref, leading-zero aware.
+
+    ``067`` and ``0067`` both normalize to ``{67}`` so the loose spoken form
+    ``067 pdf`` can resolve the file ``0067-pdf.pdf``.
+    """
+    return {int(x) for x in re.findall(r"\d+", value or "")}
+
+
+def is_document_summary_question(text: str) -> bool:
+    """True if `text` asks to summarize / overview a *specific* document.
+
+    Requires BOTH a summary intent (``summarize``, ``overview``, ``what is
+    this document about``...) AND something to reference (a filename, a numeric
+    id like ``067``, or a generic ``the report`` / ``this pdf`` / ``it``).
+
+    This deliberately does NOT classify content questions that merely mention
+    reports/documents: "What does the report say about X?" and "How many
+    documents mention the Mendoza Review?" have no summary intent and stay on
+    the normal RAG path.
+    """
+    t = (text or "").strip()
+    if not t or not _RE_SUMMARY_INTENT.search(t):
+        return False
+    return bool(
+        _RE_REF_FILENAME.search(t)
+        or _RE_REF_NUMERIC.search(t)
+        or _RE_REF_GENERIC.search(t)
+    )
+
+
+def document_reference(text: str) -> dict:
+    """Extract the document reference from a summary query.
+
+    Returns ``{"kind": "filename"|"numeric"|"generic", "value": str}``.
+    - filename: an extension-qualified token (e.g. ``0067-pdf.pdf``)
+    - numeric:  a numeric identifier (e.g. ``067`` in ``summarize the 067 pdf``)
+    - generic:  ``the report`` / ``this document`` / ``it`` - only usable via
+      conversation context
+    """
+    m = _RE_REF_FILENAME.search(text or "")
+    if m:
+        return {"kind": "filename", "value": m.group(1)}
+    nums = _RE_REF_NUMERIC.findall(text or "")
+    if nums:
+        return {"kind": "numeric", "value": "-".join(nums)}
+    if _RE_REF_GENERIC.search(text or ""):
+        return {"kind": "generic", "value": ""}
+    return {"kind": None, "value": ""}
+
+
+async def _authorized_documents(
+    db: AsyncSession,
+    role: str | None,
+    admin_bypass: bool,
+    limit: int = 200,
+) -> list[dict]:
+    """All documents the caller may *see* - RBAC boundary enforced in SQL.
+
+    Non-admin: ``status='published' AND allowed_roles && ARRAY[:role]``.
+    Admin: bypass (sees everything, exactly like the dense leg). Unauthorized
+    documents never leave the database, so nothing about them (filename, title,
+    existence, ambiguity hints) can leak into resolution results.
     """
     if admin_bypass:
         sql = (
             "SELECT id, title, filename, status, allowed_roles "
-            "FROM documents "
-            "ORDER BY title NULLS LAST, filename"
+            "FROM documents ORDER BY filename LIMIT :lim"
         )
-        result = await db.execute(text(sql))
+        rows = (await db.execute(text(sql), {"lim": limit})).fetchall()
     else:
         sql = (
             "SELECT id, title, filename, status, allowed_roles "
             "FROM documents "
-            "WHERE status = 'published' "
-            "  AND allowed_roles && ARRAY[:role] "
-            "ORDER BY title NULLS LAST, filename"
+            "WHERE status = 'published' AND allowed_roles && ARRAY[:role] "
+            "ORDER BY filename LIMIT :lim"
         )
-        result = await db.execute(text(sql), {"role": role})
-    rows = result.fetchall()
-    out: list[dict] = []
-    for r in rows:
-        title = (r.title or "").strip() or r.filename
-        out.append({
+        rows = (await db.execute(text(sql), {"role": role, "lim": limit})).fetchall()
+    return [
+        {
             "id": str(r.id),
-            "title": title,
+            "title": (r.title or "").strip() or r.filename,
             "filename": r.filename,
             "status": r.status,
             "allowed_roles": list(r.allowed_roles or []),
-        })
-    return out
+        }
+        for r in rows
+    ]
 
 
-def format_document_inventory(docs: list[dict], role: str | None) -> str:
-    """Format inventory rows into a grounded, RBAC-correct answer string."""
-    if not docs:
-        return "No documents are currently available to you in the knowledge base."
-    lines = [f"- {d['title']}" for d in docs]
-    header = "Documents available to you in the knowledge base:"
-    return f"{header}\n" + "\n".join(lines)
+def _match_documents(docs: list[dict], ref: dict) -> list[dict]:
+    """Deterministic tiered matching against an ALREADY-authorized doc list.
+
+    Tiers (first tier with hits wins): 1) exact filename, 2) normalized
+    filename, 3) exact title, 4) normalized title, 5) tightly-constrained
+    numeric identifier match. Never broad substring matching; a non-unique
+    match returns the full candidate list so the caller can ask for
+    clarification instead of guessing.
+    """
+    value = (ref.get("value") or "").lower().strip()
+    if not value:
+        return []
+    if ref.get("kind") not in ("filename", "numeric"):
+        return []
+
+    # 1 exact filename
+    hits = [d for d in docs if (d["filename"] or "").lower().strip() == value]
+    # 2 normalized filename
+    if not hits:
+        nv = _norm_filename(value)
+        hits = [d for d in docs if _norm_filename(d["filename"]) == nv]
+    # 3 exact title
+    if not hits:
+        hits = [d for d in docs if (d["title"] or "").strip().lower() == value]
+    # 4 normalized title
+    if not hits:
+        nv = _slug(value)
+        hits = [d for d in docs if _slug(d["title"]) == nv]
+    # 5 tightly constrained numeric identifier
+    if not hits:
+        ref_nums = _numeric_ids(value)
+        if ref_nums:
+            hits = [
+                d
+                for d in docs
+                if ref_nums <= (_numeric_ids(d["filename"]) | _numeric_ids(d["title"]))
+            ]
+    return hits
+
+
+async def resolve_document(
+    db: AsyncSession,
+    ref: dict,
+    role: str | None,
+    admin_bypass: bool,
+) -> list[dict]:
+    """Resolve ``ref`` against authorized documents. Returns 0/1/N matches.
+
+    Only documents the caller may access are ever queried (SQL filter, see
+    :func:`_authorized_documents`), so an inaccessible document cannot be
+    distinguished from a nonexistent one.
+    """
+    docs = await _authorized_documents(db, role, admin_bypass)
+    return _match_documents(docs, ref)
+
+
+async def resolve_document_by_id(
+    db: AsyncSession,
+    document_id: str,
+    role: str | None,
+    admin_bypass: bool,
+) -> dict | None:
+    """Re-check current authorization for a known document id (contextual refs).
+
+    Re-authorization happens in SQL so a document that became inaccessible or
+    was deleted after it appeared in conversation history resolves to ``None``.
+    """
+    if admin_bypass:
+        sql = (
+            "SELECT id, title, filename, status, allowed_roles FROM documents "
+            "WHERE id = CAST(:id AS uuid)"
+        )
+        row = (await db.execute(text(sql), {"id": document_id})).first()
+    else:
+        sql = (
+            "SELECT id, title, filename, status, allowed_roles FROM documents "
+            "WHERE id = CAST(:id AS uuid) "
+            "AND status = 'published' AND allowed_roles && ARRAY[:role]"
+        )
+        row = (await db.execute(text(sql), {"id": document_id, "role": role})).first()
+    if not row:
+        return None
+    return {
+        "id": str(row.id),
+        "title": (row.title or "").strip() or row.filename,
+        "filename": row.filename,
+        "status": row.status,
+        "allowed_roles": list(row.allowed_roles or []),
+    }
+
+
+async def document_chunks(
+    db: AsyncSession,
+    document_id: str,
+    role: str | None,
+    admin_bypass: bool,
+    limit: int | None = None,
+) -> list[RetrievedChunk]:
+    """ALL chunks of ONE resolved document, in document (chunk_index) order.
+
+    RBAC is enforced INSIDE the SQL: document must still be published AND the
+    chunk's ``allowed_roles`` must include the caller role (non-admin). Admin
+    bypass mirrors the dense leg (no status/role conditions). Never retrieve
+    then filter in Python - restricted chunks for an unauthorized caller never
+    leave the database.
+    """
+    base = (
+        "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, "
+        "c.content, c.allowed_roles, d.title AS doc_title, d.filename AS source "
+        "FROM chunks c JOIN documents d ON d.id = c.document_id "
+        "WHERE c.document_id = CAST(:id AS uuid) "
+    )
+    if admin_bypass:
+        sql = base + "ORDER BY c.chunk_index"
+        params: dict = {"id": document_id}
+    else:
+        sql = base + (
+            "AND d.status = 'published' AND c.allowed_roles && :r "
+            "ORDER BY c.chunk_index"
+        )
+        params = {"id": document_id, "r": [role]}
+    if limit is not None:
+        sql += f" LIMIT {int(limit)}"
+    rows = (await db.execute(text(sql), params)).fetchall()
+    return [
+        RetrievedChunk(
+            id=str(r.chunk_id),
+            document_id=str(r.document_id),
+            chunk_index=int(r.chunk_index),
+            content=r.content,
+            allowed_roles=list(r.allowed_roles or []),
+            title=r.doc_title,
+            source=r.source,
+            page=r.source_page,
+        )
+        for r in rows
+    ]
 
 
 def assert_rbac(chunks: list[RetrievedChunk], role: str | None, admin_bypass: bool = False) -> None:

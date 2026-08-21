@@ -17,8 +17,11 @@ from retrieval import (
     hybrid_retrieve, assert_rbac, RetrievedChunk,
     DENSE_K, LEXICAL_K, FUSE_K, RRF_K,
     is_inventory_question, list_documents, format_document_inventory,
+    is_document_summary_question, document_reference,
+    resolve_document, resolve_document_by_id, document_chunks,
 )
 from reranker import rerank, RERANK_TOP_N
+from document_summarizer import summarize_document
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
@@ -216,6 +219,240 @@ async def _persist_assistant_message(
     return row
 
 
+# ---------- Document-summary handler ----------
+
+
+# Cap for chunk detail records echoed back to the UI in document_summary mode.
+# The full chunk list may be large; we bound what the frontend receives while
+# keeping real filename/page/chunk metadata for the first few chunks.
+SUMMARY_DETAIL_CAP = 5
+
+_NO_MATCH_MSG = "I don't have access to a document matching that request. Please name a document you have access to and I'll summarize it."
+
+
+async def _summary_details(rows: list[RetrievedChunk], cap: int = SUMMARY_DETAIL_CAP) -> list[dict]:
+    """Bounded retrieval-detail rows for document_summary mode (document order)."""
+    details: list[dict] = []
+    for c in rows[:cap]:
+        details.append({
+            "document_id": c.document_id,
+            "title": c.title,
+            "source": c.source,
+            "page": c.page,
+            "chunk_id": c.id,
+            "chunk_index": c.chunk_index,
+            "allowed_roles": list(c.allowed_roles or []),
+        })
+    return details
+
+
+async def _context_document_id(db: AsyncSession, conv_id: str) -> str | None:
+    """Distinct document ids referenced by this conversation's citations.
+
+    Returns the single id if exactly ONE distinct document was referenced;
+    ``__ambiguous__`` if more than one; ``None`` if none. Caller re-checks
+    current authorization before using the id.
+    """
+    result = await db.execute(
+        text(
+            "SELECT citations, retrieval_detail FROM messages "
+            "WHERE conversation_id = CAST(:c AS uuid) AND role = 'assistant' "
+            "ORDER BY created_at DESC LIMIT 30"
+        ),
+        {"c": conv_id},
+    )
+    ids: list[str] = []
+    seen: set[str] = set()
+    for r in result.fetchall():
+        for cit in (r.citations or []):
+            did = cit.get("document_id")
+            if did and did not in seen:
+                seen.add(did)
+                ids.append(str(did))
+        for item in ((r.retrieval_detail or {}).get("retrieved") or []):
+            did = item.get("document_id")
+            if did and did not in seen:
+                seen.add(did)
+                ids.append(str(did))
+    if not ids:
+        return None
+    if len(ids) > 1:
+        return "__ambiguous__"
+    return ids[0]
+
+
+def _clarify_message(reason: str, candidates: list[dict] | None = None) -> str:
+    if reason == "no_match":
+        return _NO_MATCH_MSG
+    if reason == "ambiguous" and candidates:
+        names = ", ".join(f"{d['title']} ({d['filename']})" for d in candidates)
+        return (
+            f"Multiple documents match that reference. Which one would you like "
+            f"summarized? Available matches: {names}"
+        )
+    if reason == "no_chunks":
+        return "I don't have content in that document that your role is allowed to see."
+    # no_context / ambiguous_context / unauthorized_deleted — stay vague.
+    return (
+        "I can summarize a document you have access to - tell me which one and "
+        "I'll summarize it for you."
+    )
+
+
+async def _handle_document_summary(
+    db: AsyncSession,
+    conv_id: str,
+    user_row,
+    question: str,
+    role: str,
+    admin_bypass: bool,
+) -> AskResponse:
+    """Document-scoped summary path: resolve -> RBAC re-check -> chunks -> summarize.
+
+    Never falls back to global RAG on resolution/authorization failure: it
+    returns a safe clarification/no-match response instead, so an inaccessible
+    document is indistinguishable from a nonexistent one.
+    """
+    ref = document_reference(question)
+    matched: list[dict] = []
+    doc: dict | None = None
+    reason: str | None = None
+    candidates: list[dict] = []
+
+    if ref["kind"] in ("filename", "numeric"):
+        matched = await resolve_document(db, ref, role, admin_bypass)
+        if len(matched) == 1:
+            doc = matched[0]
+        elif len(matched) > 1:
+            reason = "ambiguous"
+            candidates = matched
+        else:
+            reason = "no_match"
+    else:
+        # generic ("the report" / "this pdf" / "it") -> conversation context.
+        ctx = await _context_document_id(db, conv_id)
+        if ctx is None:
+            reason = "no_context"
+        elif ctx == "__ambiguous__":
+            reason = "ambiguous_context"
+        else:
+            doc = await resolve_document_by_id(db, ctx, role, admin_bypass)
+            if doc is None:
+                reason = "unauthorized_deleted"
+
+    pipeline = {
+        "mode": "document_summary",
+        "dense_k": DENSE_K, "lexical_k": LEXICAL_K,
+        "fuse_k": FUSE_K, "rrf_k": RRF_K, "rerank_top_n": RERANK_TOP_N,
+    }
+
+    if reason is not None:
+        answer = _clarify_message(reason, candidates)
+        retrieval_detail = {
+            "retrieved": [],
+            "blocked": [],
+            "role": role,
+            "admin_bypass": admin_bypass,
+            "top_k": TOP_K,
+            "pipeline": {**pipeline, "reason": reason, "resolved_document": None},
+        }
+        asst_row = await _persist_assistant_message(db, conv_id, answer, [], 0, 0, retrieval_detail)
+        return AskResponse(
+            conversation_id=conv_id,
+            user_message=MessageOut(
+                id=str(user_row.id), role="user", content=user_row.content,
+                citations=None, retrieved_count=None, blocked_count=None,
+                retrieval_detail=None, created_at=user_row.created_at,
+            ),
+            assistant_message=MessageOut(
+                id=str(asst_row.id), role="assistant", content=asst_row.content,
+                citations=asst_row.citations, retrieved_count=asst_row.retrieved_count,
+                blocked_count=asst_row.blocked_count, retrieval_detail=asst_row.retrieval_detail,
+                created_at=asst_row.created_at,
+            ),
+        )
+
+    # Authorized document resolved -> fetch ONLY its chunks with RBAC inside SQL.
+    chunks = await document_chunks(db, doc["id"], role, admin_bypass)
+    if not chunks:
+        answer = _clarify_message("no_chunks")
+        retrieval_detail = {
+            "retrieved": [],
+            "blocked": [],
+            "role": role,
+            "admin_bypass": admin_bypass,
+            "top_k": TOP_K,
+            "pipeline": {
+                **pipeline,
+                "reason": "no_chunks",
+                "resolved_document": {"id": doc["id"], "title": doc["title"], "filename": doc["filename"]},
+            },
+        }
+        asst_row = await _persist_assistant_message(db, conv_id, answer, [], 0, 0, retrieval_detail)
+        return AskResponse(
+            conversation_id=conv_id,
+            user_message=MessageOut(
+                id=str(user_row.id), role="user", content=user_row.content,
+                citations=None, retrieved_count=None, blocked_count=None,
+                retrieval_detail=None, created_at=user_row.created_at,
+            ),
+            assistant_message=MessageOut(
+                id=str(asst_row.id), role="assistant", content=asst_row.content,
+                citations=asst_row.citations, retrieved_count=asst_row.retrieved_count,
+                blocked_count=asst_row.blocked_count, retrieval_detail=asst_row.retrieval_detail,
+                created_at=asst_row.created_at,
+            ),
+        )
+
+    # Defense-in-depth: chunk-level RBAC re-check (should never fire — SQL filtered).
+    assert_rbac(chunks, role, admin_bypass)
+
+    summary, chunk_count, llm_calls = await summarize_document(chunks, doc, admin_bypass)
+
+    citations = [{
+        "document_id": doc["id"],
+        "title": doc["title"],
+        "source": doc["filename"],
+        "page": None,
+        "chunk_id": None,
+        "chunk_index": None,
+    }]
+    retrieval_detail = {
+        "retrieved": await _summary_details(chunks),
+        "blocked": [],
+        "role": role,
+        "admin_bypass": admin_bypass,
+        "top_k": TOP_K,
+        "pipeline": {
+            **pipeline,
+            "document_id": doc["id"],
+            "title": doc["title"],
+            "filename": doc["filename"],
+            "chunk_count": chunk_count,
+            "llm_calls": llm_calls,
+            "reason": None,
+        },
+        "document_count": 1,
+    }
+    asst_row = await _persist_assistant_message(
+        db, conv_id, summary, citations, chunk_count, 0, retrieval_detail,
+    )
+    return AskResponse(
+        conversation_id=conv_id,
+        user_message=MessageOut(
+            id=str(user_row.id), role="user", content=user_row.content,
+            citations=None, retrieved_count=None, blocked_count=None,
+            retrieval_detail=None, created_at=user_row.created_at,
+        ),
+        assistant_message=MessageOut(
+            id=str(asst_row.id), role="assistant", content=asst_row.content,
+            citations=asst_row.citations, retrieved_count=asst_row.retrieved_count,
+            blocked_count=asst_row.blocked_count, retrieval_detail=asst_row.retrieval_detail,
+            created_at=asst_row.created_at,
+        ),
+    )
+
+
 # ---------- Ask endpoint ----------
 
 
@@ -266,6 +503,13 @@ async def ask(req: AskRequest, user: dict = Depends(require_approved), db: Async
                 created_at=asst_row.created_at,
             ),
         )
+
+    # Document-summary questions ("summarize the 067 pdf") cannot be answered by
+    # global top-K RAG (which returns the K most relevant fragments, not broad
+    # document coverage). Resolve the requested document strictly against
+    # authorized metadata, then summarize ONLY that document's chunks.
+    if is_document_summary_question(req.question):
+        return await _handle_document_summary(db, conv_id, user_row, req.question, role, admin_bypass)
 
     # Embed the question
     q_emb = (await nim_client.embed([req.question], input_type="query"))[0]
