@@ -7,13 +7,13 @@ score with ``rerank_score`` / ``rerank_rank`` populated.
 On reranker failure the pipeline degrades to the input (RRF) order so chat
 stays available — but the FIRST failure logs a loud, complete diagnostic
 (including HTTP status/body when available, plus the configured model and
-endpoint) so a misconfigured ``NIM_RERANK_MODEL`` or wrong endpoint is obvious
+endpoint) so a misconfigured ``OPENROUTER_RERANK_MODEL`` or wrong endpoint is obvious
 in the logs instead of silently degrading every request forever. A startup
 probe in ``server.py`` surfaces the same problem at boot.
 """
 import logging
 
-import nim_client
+import openrouter
 from retrieval import RetrievedChunk
 
 logger = logging.getLogger(__name__)
@@ -34,8 +34,8 @@ def _log_rerank_failure(exc: Exception) -> None:
             "RERANKER NOT WORKING — responses will be served in RRF order ONLY for every "
             "subsequent request until fixed. model=%s endpoint=%s (%s). "
             "Full failure on first call: %s",
-            nim_client.NIM_RERANK_MODEL,
-            nim_client.NIM_RERANK_ENDPOINT,
+            openrouter.OPENROUTER_RERANK_MODEL,
+            openrouter.OPENROUTER_RERANK_ENDPOINT,
             type(exc).__name__,
             detail,
         )
@@ -60,7 +60,7 @@ async def rerank(
     documents = [c.content for c in candidates]
 
     try:
-        results = await nim_client.rerank(query, documents, top_n=top_n)
+        results = await openrouter.rerank(query, documents, top_n=top_n)
     except Exception as exc:  # noqa: BLE001 - reranking is advisory; never 500 the chat
         _log_rerank_failure(exc)
         return candidates

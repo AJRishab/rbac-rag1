@@ -10,7 +10,7 @@ app_port: 7860
 
 # Sentry RAG
 
-Permission-aware RAG: **FastAPI + React + PostgreSQL/pgvector + NVIDIA NIM**.
+Permission-aware RAG: **FastAPI + React + PostgreSQL/pgvector + OpenRouter**.
 
 Documents are chunked, embedded, and tagged with the roles allowed to see them.
 When a user asks a question, retrieval is filtered by that user's role **inside the
@@ -20,13 +20,13 @@ SQL query**, so restricted content is never even touched by the answer step.
 
 - **RBAC enforced at retrieval time** — the role filter is a `WHERE` clause on a cosine
   similarity query; the LLM only ever sees chunks the user is allowed to read.
-- **Chunk-level role tagging** — the NIM LLM suggests roles per chunk during upload;
+- **Chunk-level role tagging** — the OpenRouter LLM suggests roles per chunk during upload;
   an admin reviews, adjusts, and publishes. Unpublished documents are never retrievable.
 - **Transparent retrieval** — every answer records how many chunks were retrieved vs.
   blocked by access rules, with per-answer `retrieval_detail` persisted.
 - **Supabase-flavored auth** — signup/login via Supabase Auth (JWT), profile records in
   the `profiles` table, admin-managed approval + role assignment.
-- **NVIDIA NIM** — `nvidia/nemotron-3-embed-1b` embeddings (2048 dimensions) and a NIM chat model; retries and
+- **OpenRouter** — `liquid/lfm-2.5-embedding-350m:free` embeddings (1024 dimensions) and an OpenAI-compatible chat; retries and
   HTTP 429 handling built in.
 - **Deployable free** — a Docker Space serves the React SPA and the API on one port
   (`7860`); an optional Vercel frontend and Capacitor Android build are supported.
@@ -34,7 +34,7 @@ SQL query**, so restricted content is never even touched by the answer step.
 ## Architecture
 
 ```
-Supabase (auth + Postgres/pgvector)          NVIDIA NIM (embeddings + chat)
+Supabase (auth + Postgres/pgvector)          OpenRouter (embeddings + chat)
         │  JWT (verified via JWKS)                    │
         └─────────────── FastAPI  ◄──────► npm (React SPA)
                              │
@@ -59,7 +59,7 @@ RBAC-RAG/
 │  ├─ server.py              # FastAPI app, /api, CORS, SPA serving
 │  ├─ database.py            # init_db, tables, handle_new_user trigger
 │  ├─ deps.py                # require_approved / current-user deps (JWT via JWKS)
-│  ├─ nim_client.py          # NIM embeddings + chat + chunk-role suggestion
+│  ├─ openrouter.py          # OpenRouter embeddings + chat + rerank + chunk-role suggestion
 │  ├─ ingest.py              # parsing → chunking (~500-token, 50 overlap) → embedding
 │  ├─ schemas.py             # Pydantic request/response models
 │  ├─ routers/               # auth_router, admin_router, chat_router
@@ -74,7 +74,7 @@ RBAC-RAG/
 ## How RBAC is enforced
 
 1. **Upload** (`POST /api/admin/documents`) — the file is parsed, chunked, embedded, and
-   the NIM model suggests `allowed_roles` per chunk (`roles_ai_suggested = true`).
+   the OpenRouter model suggests `allowed_roles` per chunk (`roles_ai_suggested = true`).
 2. **Review** — admins browse chunks, correct the suggested roles, then publish the
    document (`POST /publish`). Only `status = 'published'` documents are searchable.
 3. **Ask** — the query is embedded, then one SQL statement ranks chunks by cosine
@@ -111,7 +111,7 @@ RBAC-RAG/
 
 ## Getting started
 
-Requirements: Python 3.11+, Node 20+, a Supabase project, and an NVIDIA NIM API key.
+Requirements: Python 3.11+, Node 20+, a Supabase project, and an OpenRouter API key.
 
 **Backend**
 
@@ -137,10 +137,10 @@ npm start        # craco (CRA), http://localhost:3000
 | Variable | Extent | Notes |
 |---|---|---|
 | `DATABASE_URL` | backend | `postgresql+asyncpg://…` (Supabase) |
-| `NIM_API_KEY` | backend | NVIDIA NIM key |
+| `OPENROUTER_API_KEY` | backend | OpenRouter key |
 | `SUPABASE_URL` | backend | Used to fetch JWKS signing key |
 | `CORS_ORIGINS` | backend | Default `https://rbac-rag-nine.vercel.app` |
-| `NIM_BASE_URL` / `NIM_EMBED_MODEL` / `NIM_CHAT_MODEL` | backend | Optional overrides |
+| `OPENROUTER_BASE_URL` / `OPENROUTER_EMBED_MODEL` / `OPENROUTER_CHAT_MODEL` / `OPENROUTER_RERANK_MODEL` | backend | Optional overrides |
 | `FRONTEND_BUILD_DIR` | backend | Path to the React build for SPA serving |
 | `REACT_APP_SUPABASE_URL` / `REACT_APP_SUPABASE_ANON_KEY` | frontend | Build-time auth vars |
 | `REACT_APP_BACKEND_URL` | frontend | API origin (empty = same origin) |

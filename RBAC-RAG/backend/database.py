@@ -51,7 +51,7 @@ SCHEMA_SQL = [
         document_id uuid NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
         chunk_index int NOT NULL,
         content text NOT NULL,
-        embedding vector(2048) NOT NULL,
+        embedding vector(1024) NOT NULL,
         allowed_roles text[] NOT NULL DEFAULT ARRAY[]::text[],
         roles_ai_suggested boolean NOT NULL DEFAULT true,
         source_page int
@@ -144,17 +144,17 @@ async def init_db():
         for stmt in SCHEMA_SQL:
             await conn.execute(text(stmt))
 
-        # Supabase Auth migration: profiles, new-user trigger, FK repoint, RLS.
-        # Idempotent. Statements run individually so a plain Postgres dev DB
-        # (no Supabase auth schema) skips only the auth-dependent ones.
-        migration_path = Path(__file__).parent / "migrations" / "001_supabase_auth.sql"
-        if migration_path.is_file():
-            migration_sql = migration_path.read_text(encoding="utf-8")
-            for stmt in _split_sql(migration_sql):
+        # Apply every idempotent migration file (e.g. 001_supabase_auth.sql,
+        # 005_openrouter_embed_1024.sql) in filename order. Statements run
+        # individually and failures are skipped-not-fatal so a plain Postgres
+        # dev DB (no Supabase auth schema) ignores only the auth-dependent ones.
+        migrations_dir = Path(__file__).parent / "migrations"
+        for migration_path in sorted(migrations_dir.glob("*.sql")):
+            for stmt in _split_sql(migration_path.read_text(encoding="utf-8")):
                 try:
                     await conn.execute(text(stmt))
                 except Exception as exc:  # e.g. no auth.users on plain Postgres
                     logger.warning(
-                        "Supabase auth migration statement skipped (%s): %s",
-                        type(exc).__name__, exc,
+                        "Migration %s statement skipped (%s): %s",
+                        migration_path.name, type(exc).__name__, exc,
                     )

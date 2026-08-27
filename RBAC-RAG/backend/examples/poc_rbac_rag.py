@@ -20,10 +20,10 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 
 load_dotenv(Path(__file__).parent / ".env")
 
-NIM_API_KEY = os.environ["NIM_API_KEY"]
-NIM_BASE_URL = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
-NIM_EMBED_MODEL = os.environ.get("NIM_EMBED_MODEL", "nvidia/nv-embedqa-e5-v5")
-NIM_CHAT_MODEL = os.environ.get("NIM_CHAT_MODEL", "meta/llama-3.3-70b-instruct")
+OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
+OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_EMBED_MODEL = os.environ.get("OPENROUTER_EMBED_MODEL", "liquid/lfm-2.5-embedding-350m:free")
+OPENROUTER_CHAT_MODEL = os.environ.get("OPENROUTER_CHAT_MODEL", "google/gemma-4-31b-it:free")
 DATABASE_URL = os.environ["DATABASE_URL"]
 
 # ------------------------------ NIM helpers ------------------------------
@@ -34,14 +34,14 @@ async def nim_embed(client: httpx.AsyncClient, texts: list[str], input_type: str
     """
     payload = {
         "input": texts,
-        "model": NIM_EMBED_MODEL,
+        "model": OPENROUTER_EMBED_MODEL,
         "input_type": input_type,
         "encoding_format": "float",
         "truncate": "NONE",
     }
     r = await client.post(
-        f"{NIM_BASE_URL}/embeddings",
-        headers={"Authorization": f"Bearer {NIM_API_KEY}", "Accept": "application/json"},
+        f"{OPENROUTER_BASE_URL}/embeddings",
+        headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Accept": "application/json"},
         json=payload,
         timeout=60.0,
     )
@@ -53,7 +53,7 @@ async def nim_embed(client: httpx.AsyncClient, texts: list[str], input_type: str
 
 async def nim_chat(client: httpx.AsyncClient, system: str, user: str) -> str:
     payload = {
-        "model": NIM_CHAT_MODEL,
+        "model": OPENROUTER_CHAT_MODEL,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -63,8 +63,8 @@ async def nim_chat(client: httpx.AsyncClient, system: str, user: str) -> str:
         "max_tokens": 512,
     }
     r = await client.post(
-        f"{NIM_BASE_URL}/chat/completions",
-        headers={"Authorization": f"Bearer {NIM_API_KEY}", "Accept": "application/json"},
+        f"{OPENROUTER_BASE_URL}/chat/completions",
+        headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Accept": "application/json"},
         json=payload,
         timeout=90.0,
     )

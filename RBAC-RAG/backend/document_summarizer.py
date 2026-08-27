@@ -18,7 +18,7 @@ import logging
 
 import tiktoken
 
-import nim_client
+import openrouter
 from retrieval import RetrievedChunk
 
 logger = logging.getLogger(__name__)
@@ -112,7 +112,7 @@ async def _call_map(batch_text: str, doc: dict) -> str:
         "Output only the summary, no preamble."
     )
     user = f"{_doc_intro(doc)}\n\nSection content:\n{batch_text}"
-    return await nim_client.chat(system, user, max_tokens=SUMMARY_OUT_MAX_TOKENS, temperature=0.2)
+    return await openrouter.chat(system, user, max_tokens=SUMMARY_OUT_MAX_TOKENS, temperature=0.2)
 
 
 async def _call_reduce(group_text: str, doc: dict) -> str:
@@ -123,7 +123,7 @@ async def _call_reduce(group_text: str, doc: dict) -> str:
         "key point and losing nothing important. Output only the condensed summary."
     )
     user = f"{_doc_intro(doc)}\n\nSection summaries:\n{group_text}"
-    return await nim_client.chat(system, user, max_tokens=SUMMARY_OUT_MAX_TOKENS, temperature=0.2)
+    return await openrouter.chat(system, user, max_tokens=SUMMARY_OUT_MAX_TOKENS, temperature=0.2)
 
 
 async def _call_final(parts: list[str], doc: dict) -> str:
@@ -137,7 +137,7 @@ async def _call_final(parts: list[str], doc: dict) -> str:
     )
     body = "\n\n".join(f"[Part summary {i + 1}]\n{p}" for i, p in enumerate(parts))
     user = f"{_doc_intro(doc)}\n\nSection summaries:\n{body}"
-    return await nim_client.chat(system, user, max_tokens=SUMMARY_OUT_MAX_TOKENS, temperature=0.4)
+    return await openrouter.chat(system, user, max_tokens=SUMMARY_OUT_MAX_TOKENS, temperature=0.4)
 
 
 async def summarize_document(
@@ -202,4 +202,4 @@ async def _call_final_group(text: str, doc: dict) -> str:
         " Do not mention or imply any other document. Output only the summary."
     )
     user = f"{_doc_intro(doc)}\n\nDocument content:\n{text}"
-    return await nim_client.chat(system, user, max_tokens=SUMMARY_OUT_MAX_TOKENS, temperature=0.4)
+    return await openrouter.chat(system, user, max_tokens=SUMMARY_OUT_MAX_TOKENS, temperature=0.4)
