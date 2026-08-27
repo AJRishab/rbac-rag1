@@ -40,7 +40,10 @@ NIM_RERANK_BASE_URL = (
     or "https://ai.api.nvidia.com"
 ).rstrip("/")
 # Canonical rerank route appended to NIM_RERANK_BASE_URL.
-NIM_RERANK_PATH = "/v1/retrieval/nvidia/reranking"
+NIM_RERANK_PATH = (
+    f"/v1/retrieval/nvidia/"
+    f"{NIM_RERANK_MODEL.removeprefix('nvidia/')}/reranking"
+)
 
 
 def _rerank_endpoint() -> str:
