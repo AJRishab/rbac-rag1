@@ -21,7 +21,9 @@ NIM_BASE_URL = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/
 # Nemotron-3 Embed returns 2048-dimensional vectors, matching the database
 # schema and HNSW index. Keep this default aligned with `chunks.embedding`.
 NIM_EMBED_MODEL = os.environ.get("NIM_EMBED_MODEL", "nvidia/nemotron-3-embed-1b")
-NIM_CHAT_MODEL = os.environ.get("NIM_CHAT_MODEL", "meta/llama-3.1-8b-instruct")
+# Llama 3.1 8B was retired by NVIDIA on 2026-08-26. Keep the fallback on
+# the currently hosted successor; deployments can still override it via env.
+NIM_CHAT_MODEL = os.environ.get("NIM_CHAT_MODEL", "meta/llama-3.3-70b-instruct")
 # NIM reranker. Verified live against a real call:
 #   POST https://ai.api.nvidia.com/v1/retrieval/nvidia/reranking  (HTTP 200)
 #   model: nv-rerank-qa-mistral-4b:1  (short name + ":1" version suffix —
