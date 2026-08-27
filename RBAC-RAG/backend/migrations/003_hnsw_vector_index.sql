@@ -1,4 +1,7 @@
--- 003_hnsw_vector_index.sql – create HNSW index for vector similarity
+-- 003_hnsw_vector_index.sql – create HNSW index for vector similarity.
+-- Nemotron-3 Embed returns 2048 dimensions. pgvector's regular vector HNSW
+-- indexes support at most 2000 dimensions, so this is a half-precision
+-- expression index (supported by pgvector 0.7+).
 -- Idempotent migration: creates a HNSW index on the `embedding` column of `chunks`.
 -- No DROP statement is included; to roll back, execute the corresponding DROP manually.
 --
@@ -13,9 +16,9 @@
 --   JOIN documents d ON d.id = c.document_id
 --   WHERE d.status = 'published'
 --     AND c.allowed_roles && ARRAY['manager']
---   ORDER BY c.embedding <=> '[0,0,0,...]'::vector
+--   ORDER BY c.embedding::halfvec(2048) <=> '[0,0,0,...]'::halfvec
 --   LIMIT 10;
 --   Look for "Index Scan" on chunks_embedding_hnsw_idx.
 
 CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw_idx
-    ON chunks USING hnsw (embedding vector_cosine_ops);
+    ON chunks USING hnsw ((embedding::halfvec(2048)) halfvec_cosine_ops);

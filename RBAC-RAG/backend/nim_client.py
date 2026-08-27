@@ -18,7 +18,9 @@ load_dotenv(Path(__file__).parent / ".env", override=True)
 logger = logging.getLogger(__name__)
 
 NIM_BASE_URL = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
-NIM_EMBED_MODEL = os.environ.get("NIM_EMBED_MODEL", "nvidia/nv-embedqa-e5-v5")
+# Nemotron-3 Embed returns 2048-dimensional vectors, matching the database
+# schema and HNSW index. Keep this default aligned with `chunks.embedding`.
+NIM_EMBED_MODEL = os.environ.get("NIM_EMBED_MODEL", "nvidia/nemotron-3-embed-1b")
 NIM_CHAT_MODEL = os.environ.get("NIM_CHAT_MODEL", "meta/llama-3.1-8b-instruct")
 # NIM reranker. Verified live against a real call:
 #   POST https://ai.api.nvidia.com/v1/retrieval/nvidia/reranking  (HTTP 200)

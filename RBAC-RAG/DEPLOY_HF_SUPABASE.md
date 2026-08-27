@@ -81,7 +81,7 @@ Settings → **Variables and secrets**:
 | `REACT_APP_BACKEND_URL` | Frontend API origin | Optional; empty = same-origin `/api` in the Space |
 
 Optional overrides: `NIM_BASE_URL` (default `https://integrate.api.nvidia.com/v1`),
-`NIM_EMBED_MODEL` (default `nvidia/nv-embedqa-e5-v5`), `NIM_CHAT_MODEL`,
+`NIM_EMBED_MODEL` (default `nvidia/nemotron-3-embed-1b`, 2048 dimensions), `NIM_CHAT_MODEL`,
 `NIM_RERANK_MODEL` (set to an active NIM rerank model ID *for your key* — verify
 with `curl -s https://integrate.api.nvidia.com/v1/models -H "Authorization: Bearer $NIM_API_KEY" | python3 -m json.tool | grep -i rerank`;
 the default `nvidia/nv-rerankqa-mistral-4b-v3` is deprecated). At startup a

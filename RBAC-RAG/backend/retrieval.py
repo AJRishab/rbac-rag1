@@ -94,9 +94,10 @@ async def _dense_retrieve(
         rows = (await db.execute(
             text(
                 "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.content, c.allowed_roles, "
-                "d.title AS doc_title, d.filename AS source, (c.embedding <=> CAST(:q AS vector)) AS distance "
+                "d.title AS doc_title, d.filename AS source, "
+                "(c.embedding::halfvec(2048) <=> CAST(:q AS halfvec)) AS distance "
                 "FROM chunks c JOIN documents d ON d.id = c.document_id "
-                "ORDER BY c.embedding <=> CAST(:q AS vector) LIMIT :k"
+                "ORDER BY c.embedding::halfvec(2048) <=> CAST(:q AS halfvec) LIMIT :k"
             ),
             {"q": q_vec, "k": k},
         )).fetchall()
@@ -107,10 +108,11 @@ async def _dense_retrieve(
     rows = (await db.execute(
         text(
             "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.content, c.allowed_roles, "
-            "d.title AS doc_title, d.filename AS source, (c.embedding <=> CAST(:q AS vector)) AS distance "
+            "d.title AS doc_title, d.filename AS source, "
+            "(c.embedding::halfvec(2048) <=> CAST(:q AS halfvec)) AS distance "
             "FROM chunks c JOIN documents d ON d.id = c.document_id "
             "WHERE d.status = 'published' AND c.allowed_roles && :r "
-            "ORDER BY c.embedding <=> CAST(:q AS vector) LIMIT :k"
+            "ORDER BY c.embedding::halfvec(2048) <=> CAST(:q AS halfvec) LIMIT :k"
         ),
         {"q": q_vec, "r": [role], "k": k},
     )).fetchall()
@@ -123,7 +125,7 @@ async def _dense_retrieve(
             "d.title AS doc_title, d.filename AS source "
             "FROM chunks c JOIN documents d ON d.id = c.document_id "
             "WHERE d.status = 'published' "
-            "ORDER BY c.embedding <=> CAST(:q AS vector) LIMIT :k"
+            "ORDER BY c.embedding::halfvec(2048) <=> CAST(:q AS halfvec) LIMIT :k"
         ),
         {"q": q_vec, "k": k},
     )).fetchall()

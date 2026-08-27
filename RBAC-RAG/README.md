@@ -26,7 +26,7 @@ SQL query**, so restricted content is never even touched by the answer step.
   blocked by access rules, with per-answer `retrieval_detail` persisted.
 - **Supabase-flavored auth** — signup/login via Supabase Auth (JWT), profile records in
   the `profiles` table, admin-managed approval + role assignment.
-- **NVIDIA NIM** — `nvidia/nv-embedqa-e5-v5` embeddings and a NIM chat model; retries and
+- **NVIDIA NIM** — `nvidia/nemotron-3-embed-1b` embeddings (2048 dimensions) and a NIM chat model; retries and
   HTTP 429 handling built in.
 - **Deployable free** — a Docker Space serves the React SPA and the API on one port
   (`7860`); an optional Vercel frontend and Capacitor Android build are supported.

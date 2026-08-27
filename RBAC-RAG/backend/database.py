@@ -51,7 +51,7 @@ SCHEMA_SQL = [
         document_id uuid NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
         chunk_index int NOT NULL,
         content text NOT NULL,
-        embedding vector(1024) NOT NULL,
+        embedding vector(2048) NOT NULL,
         allowed_roles text[] NOT NULL DEFAULT ARRAY[]::text[],
         roles_ai_suggested boolean NOT NULL DEFAULT true,
         source_page int
