@@ -17,8 +17,12 @@ from dataclasses import dataclass
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from rank_bm25 import BM25Okapi
+import os
 
 logger = logging.getLogger(__name__)
+
+# HNSW ef_search default; can be overridden via HNSW_EF_SEARCH env var.
+DEFAULT_HNSW_EF = int(os.getenv("HNSW_EF_SEARCH", "64"))
 
 # Candidate-pool sizes per leg. Larger than the final top-k so fusion + rerank
 # have a real pool to work with before truncating to TOP_K in the LLM call.
@@ -86,6 +90,7 @@ async def _dense_retrieve(
     blocked is empty.
     """
     if admin_bypass:
+        await db.execute(text("SET LOCAL hnsw.ef_search = :ef"), {"ef": DEFAULT_HNSW_EF})
         rows = (await db.execute(
             text(
                 "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.content, c.allowed_roles, "
@@ -97,6 +102,8 @@ async def _dense_retrieve(
         )).fetchall()
         return [_chunk_from_dense_row(r, i + 1) for i, r in enumerate(rows)], []
 
+    # non-admin path – enforce RBAC filter in SQL
+    await db.execute(text("SET LOCAL hnsw.ef_search = :ef"), {"ef": DEFAULT_HNSW_EF})
     rows = (await db.execute(
         text(
             "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.content, c.allowed_roles, "
