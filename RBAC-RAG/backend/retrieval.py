@@ -90,7 +90,10 @@ async def _dense_retrieve(
     blocked is empty.
     """
     if admin_bypass:
-        await db.execute(text("SET LOCAL hnsw.ef_search = :ef"), {"ef": DEFAULT_HNSW_EF})
+        # NOTE: `SET` is a Postgres utility command and CANNOT take a bound parameter
+        # (asyncpg would emit `$1`, which Postgres rejects). DEFAULT_HNSW_EF is an
+        # integer read from our own env config, so it is safe to inline directly.
+        await db.execute(text(f"SET LOCAL hnsw.ef_search = {DEFAULT_HNSW_EF}"))
         rows = (await db.execute(
             text(
                 "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.content, c.allowed_roles, "
@@ -104,7 +107,7 @@ async def _dense_retrieve(
         return [_chunk_from_dense_row(r, i + 1) for i, r in enumerate(rows)], []
 
     # non-admin path – enforce RBAC filter in SQL
-    await db.execute(text("SET LOCAL hnsw.ef_search = :ef"), {"ef": DEFAULT_HNSW_EF})
+    await db.execute(text(f"SET LOCAL hnsw.ef_search = {DEFAULT_HNSW_EF}"))
     rows = (await db.execute(
         text(
             "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.content, c.allowed_roles, "
