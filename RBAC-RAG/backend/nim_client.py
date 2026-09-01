@@ -41,7 +41,11 @@ NIM_EMBED_MODEL = os.environ.get("NIM_EMBED_MODEL", "nvidia/llama-nemotron-embed
 # BOTH passage (ingestion) and query (search) embeddings so the two always
 # share the same model, dimension, and normalization behavior.
 NIM_EMBED_DIM = int(os.environ.get("NIM_EMBED_DIM", "1024"))
-NIM_CHAT_MODEL = os.environ.get("NIM_CHAT_MODEL", "meta/llama-3.1-8b-instruct")
+# Chat/answer-generation model. The previous hosted default
+# meta/llama-3.1-8b-instruct now returns HTTP 410 Gone from
+# integrate.api.nvidia.com. nvidia/nemotron-3.5-lightning-30b-a3b is a
+# currently-cataloged, live-verified chat model on the same endpoint.
+NIM_CHAT_MODEL = os.environ.get("NIM_CHAT_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b")
 # NIM reranker. Verified live against a real call:
 #   POST https://ai.api.nvidia.com/v1/retrieval/nvidia/reranking  (HTTP 200)
 #   model: nv-rerank-qa-mistral-4b:1  (short name + ":1" version suffix —
