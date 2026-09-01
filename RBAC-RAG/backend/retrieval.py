@@ -17,12 +17,8 @@ from dataclasses import dataclass
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from rank_bm25 import BM25Okapi
-import os
 
 logger = logging.getLogger(__name__)
-
-# HNSW ef_search default; can be overridden via HNSW_EF_SEARCH env var.
-DEFAULT_HNSW_EF = int(os.getenv("HNSW_EF_SEARCH", "64"))
 
 # Candidate-pool sizes per leg. Larger than the final top-k so fusion + rerank
 # have a real pool to work with before truncating to TOP_K in the LLM call.
@@ -71,9 +67,7 @@ def _chunk_from_dense_row(row, rank: int) -> RetrievedChunk:
         title=row.doc_title,
         source=row.source,
         page=row.source_page,
-        # distance can be None if an embedding is NULL (e.g. mid re-embed);
-        # never crash the request for it.
-        distance=float(row.distance) if row.distance is not None else None,
+        distance=float(row.distance),
         dense_rank=rank,
     )
 
@@ -92,32 +86,23 @@ async def _dense_retrieve(
     blocked is empty.
     """
     if admin_bypass:
-        # NOTE: `SET` is a Postgres utility command and CANNOT take a bound parameter
-        # (asyncpg would emit `$1`, which Postgres rejects). DEFAULT_HNSW_EF is an
-        # integer read from our own env config, so it is safe to inline directly.
-        await db.execute(text(f"SET LOCAL hnsw.ef_search = {DEFAULT_HNSW_EF}"))
         rows = (await db.execute(
             text(
                 "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.content, c.allowed_roles, "
-                "d.title AS doc_title, d.filename AS source, "
-                "(c.embedding <=> CAST(:q AS vector)) AS distance "
+                "d.title AS doc_title, d.filename AS source, (c.embedding <=> CAST(:q AS vector)) AS distance "
                 "FROM chunks c JOIN documents d ON d.id = c.document_id "
-                "WHERE c.embedding IS NOT NULL "
                 "ORDER BY c.embedding <=> CAST(:q AS vector) LIMIT :k"
             ),
             {"q": q_vec, "k": k},
         )).fetchall()
         return [_chunk_from_dense_row(r, i + 1) for i, r in enumerate(rows)], []
 
-    # non-admin path – enforce RBAC filter in SQL
-    await db.execute(text(f"SET LOCAL hnsw.ef_search = {DEFAULT_HNSW_EF}"))
     rows = (await db.execute(
         text(
             "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.content, c.allowed_roles, "
-            "d.title AS doc_title, d.filename AS source, "
-            "(c.embedding <=> CAST(:q AS vector)) AS distance "
+            "d.title AS doc_title, d.filename AS source, (c.embedding <=> CAST(:q AS vector)) AS distance "
             "FROM chunks c JOIN documents d ON d.id = c.document_id "
-            "WHERE d.status = 'published' AND c.allowed_roles && :r AND c.embedding IS NOT NULL "
+            "WHERE d.status = 'published' AND c.allowed_roles && :r "
             "ORDER BY c.embedding <=> CAST(:q AS vector) LIMIT :k"
         ),
         {"q": q_vec, "r": [role], "k": k},
@@ -130,7 +115,7 @@ async def _dense_retrieve(
             "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.allowed_roles, "
             "d.title AS doc_title, d.filename AS source "
             "FROM chunks c JOIN documents d ON d.id = c.document_id "
-            "WHERE d.status = 'published' AND c.embedding IS NOT NULL "
+            "WHERE d.status = 'published' "
             "ORDER BY c.embedding <=> CAST(:q AS vector) LIMIT :k"
         ),
         {"q": q_vec, "k": k},

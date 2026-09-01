@@ -243,7 +243,7 @@ def test_11_small_document_single_batch():
         assert "source" in system
         return "FINAL SUMMARY"
 
-    with patch("document_summarizer.openrouter.chat", side_effect=fake_chat) as m:
+    with patch("document_summarizer.nim_client.chat", side_effect=fake_chat) as m:
         chunks = [_rk(i, text=f"short content {i}") for i in range(3)]
         summary, n, calls = run(S.summarize_document(
             chunks, {"id": "a", "title": "T", "filename": "0067-pdf.pdf"}, False,
@@ -263,7 +263,7 @@ def test_12_large_document_multi_batch():
         captured.append(system)
         return "PART" if "section summary" in system else "FINAL"
 
-    with patch("document_summarizer.openrouter.chat", side_effect=fake_chat) as m:
+    with patch("document_summarizer.nim_client.chat", side_effect=fake_chat) as m:
         summary, n, calls = run(S.summarize_document(
             chunks, {"id": "a", "title": "T", "filename": "0067-pdf.pdf"}, False,
         ))
@@ -288,7 +288,7 @@ def test_13_recursive_reduction_large_document(monkeypatch):
             return "The section recaps key findings, operational metrics, and forward-looking policy. " * 5
         return "THE FINAL SUMMARY"
 
-    with patch("document_summarizer.openrouter.chat", side_effect=fake_chat):
+    with patch("document_summarizer.nim_client.chat", side_effect=fake_chat):
         summary, _, calls = run(S.summarize_document(
             chunks, {"id": "a", "title": "T", "filename": "0067-pdf.pdf"}, False,
         ))
@@ -309,7 +309,7 @@ def test_14_citation_source_identity_integrity():
         assert "INSIDE the supplied text" in system  # source-grounding rule present
         return "A summary of the authorized document."
 
-    with patch("document_summarizer.openrouter.chat", side_effect=fake_chat):
+    with patch("document_summarizer.nim_client.chat", side_effect=fake_chat):
         resp = run(_handle_document_summary(db, "conv-1", user_row(), "summarize 0067", "manager", False))
 
     am = resp.assistant_message
@@ -356,7 +356,7 @@ def test_security_inaccessible_document_gets_safe_response():
     db = FakeDb([
         FakeResult([docrow("h", "Visible", "0068.pdf", ["hr"])]),
     ])
-    with patch("routers.chat_router.openrouter.chat"):
+    with patch("routers.chat_router.nim_client.chat"):
         resp = run(_handle_document_summary(db, "conv-1", user_row(), "summarize the 0067 pdf", "hr", False))
     am = resp.assistant_message
     assert am.retrieval_detail["pipeline"]["mode"] == "document_summary"
@@ -372,7 +372,7 @@ def test_document_summary_never_touches_rag_path():
         FakeResult([docrow("a1", "T", "0067-pdf.pdf", ["manager"])]),
         FakeResult([chunkrow(1, "a1", 0, "some content", ["manager"])]),
     ])
-    with patch("document_summarizer.openrouter.chat") as chat, \
+    with patch("document_summarizer.nim_client.chat") as chat, \
          patch("retrieval._dense_retrieve", side_effect=AssertionError("dense called")), \
          patch("retrieval._lexical_retrieve", side_effect=AssertionError("bm25 called")), \
          patch("routers.chat_router.rerank", side_effect=AssertionError("rerank called")):
@@ -391,7 +391,7 @@ def test_contextual_summary_resolves_single_document():
         FakeResult([chunkrow(1, "d1", 0, "content one", ["manager"]),
                     chunkrow(2, "d1", 1, "content two", ["manager"])]),  # chunks
     ])
-    with patch("document_summarizer.openrouter.chat", side_effect=lambda *a, **k: "CONTEXTUAL SUMMARY"):
+    with patch("document_summarizer.nim_client.chat", side_effect=lambda *a, **k: "CONTEXTUAL SUMMARY"):
         resp = run(_handle_document_summary(db, "conv-1", user_row(), "summarize the report", "manager", False))
     am = resp.assistant_message
     assert am.retrieval_detail["pipeline"]["mode"] == "document_summary"

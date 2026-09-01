@@ -14,7 +14,7 @@ from schemas import (
 )
 from ingest import chunk_file
 from utils import fmt_vec
-import openrouter
+import nim_client
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 logger = logging.getLogger(__name__)
@@ -129,7 +129,7 @@ def _parse_and_chunk(filename: str, data: bytes) -> list[tuple[str, int | None]]
 
 async def _embed_chunks(chunks: list[str]) -> list[list[float]]:
     try:
-        return await openrouter.embed(chunks, input_type="passage")
+        return await nim_client.embed(chunks, input_type="passage")
     except HTTPException:
         raise
     except Exception as e:
@@ -185,7 +185,7 @@ async def upload_document(
     chunks = _parse_and_chunk(filename, data)
     chunk_texts = [content for content, _page in chunks]
     embeddings = await _embed_chunks(chunk_texts)
-    chunk_roles = await openrouter.suggest_chunk_roles(chunk_texts, roles)
+    chunk_roles = await nim_client.suggest_chunk_roles(chunk_texts, roles)
 
     doc_title = title.strip() or filename
     doc = await _persist_document(db, doc_title, filename, admin["id"], roles, chunks, embeddings, chunk_roles)

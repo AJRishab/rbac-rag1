@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from deps import get_db, require_approved
 from schemas import ConversationOut, MessageOut, AskRequest, AskResponse
 from utils import fmt_vec
-import openrouter
+import nim_client
 from retrieval import (
     hybrid_retrieve, assert_rbac, RetrievedChunk,
     DENSE_K, LEXICAL_K, FUSE_K, RRF_K,
@@ -187,7 +187,7 @@ async def _generate_answer(rows: list[RetrievedChunk], question: str, admin_bypa
         "provided [Source #N: ...] headers — never text extracted from within the chunks."
     )
     user_prompt = f"Question: {question}\n\nSources:\n{context}"
-    return await openrouter.chat(system_prompt, user_prompt, max_tokens=700, temperature=0.2)
+    return await nim_client.chat(system_prompt, user_prompt, max_tokens=700, temperature=0.2)
 
 
 async def _persist_assistant_message(
@@ -512,7 +512,7 @@ async def ask(req: AskRequest, user: dict = Depends(require_approved), db: Async
         return await _handle_document_summary(db, conv_id, user_row, req.question, role, admin_bypass)
 
     # Embed the question
-    q_emb = (await openrouter.embed([req.question], input_type="query"))[0]
+    q_emb = (await nim_client.embed([req.question], input_type="query"))[0]
     q_vec = fmt_vec(q_emb)
 
     # Hybrid retrieval: dense (pgvector) + BM25 lexical + RRF fusion, with RBAC

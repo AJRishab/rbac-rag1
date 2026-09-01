@@ -2,7 +2,7 @@
 
 Environment:
 - DATABASE_URL (postgres+asyncpg://)
-- OPENROUTER_API_KEY
+- NIM_API_KEY
 - SUPABASE_URL (https://<project-ref>.supabase.co) — for JWKS token verification
 - CORS_ORIGINS (comma-separated; defaults to https://rbac-rag-nine.vercel.app)
 """
@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env", override=True)
 
 from database import init_db
-import openrouter
+import nim_client
 from routers.auth_router import router as auth_router
 from routers.admin_router import router as admin_router
 from routers.chat_router import router as chat_router
@@ -38,24 +38,24 @@ async def lifespan(app: FastAPI):
     await init_db()
 
     # Loud, non-fatal reranker health check at boot: a misconfigured
-    # OPENROUTER_RERANK_MODEL or wrong reranker host/model should be visible in the
+    # NIM_RERANK_MODEL or wrong reranker host/model should be visible in the
     # startup logs immediately, not discovered via silent RRF-degraded answers.
     if os.environ.get("RERANK_PROBE_ON_STARTUP", "true").lower() not in {"0", "false", "no"}:
-        ok, detail = await openrouter.probe_reranker()
+        ok, detail = await nim_client.probe_reranker()
         if ok:
             logger.info("NIM reranker health check OK (model=%s @ %s)",
-                        openrouter.OPENROUTER_RERANK_MODEL, openrouter.OPENROUTER_RERANK_ENDPOINT)
+                        nim_client.NIM_RERANK_MODEL, nim_client.NIM_RERANK_ENDPOINT)
         else:
             logger.error(
                 "NIM reranker health check FAILED — reranking will fall back to RRF order. "
                 "model=%s endpoint=%s. %s",
-                openrouter.OPENROUTER_RERANK_MODEL, openrouter.OPENROUTER_RERANK_ENDPOINT, detail,
+                nim_client.NIM_RERANK_MODEL, nim_client.NIM_RERANK_ENDPOINT, detail,
             )
 
     logger.info("Sentry RAG - startup complete")
     yield
     logger.info("Sentry RAG - shutdown")
-    await openrouter.close_client()
+    await nim_client.close_client()
 
 
 app = FastAPI(title="SENTRY/RAG", lifespan=lifespan)

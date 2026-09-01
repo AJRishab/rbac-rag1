@@ -29,13 +29,13 @@ app**. The older "allow-all" prototype presented in the original README is histo
   `require_approved` gating on `profiles.role` + `profiles.status`.
 - **SQL schema** (created on startup): `profiles` (linked to `auth.users`),
   `documents` (`status` = `pending_review` / `published`), `chunks`
-  (`embedding vector(2048)`, `allowed_roles text[]`, `roles_ai_suggested bool`),
+  (`embedding vector(1024)`, `allowed_roles text[]`, `roles_ai_suggested bool`),
   `conversations`, `messages` (persists `citations`, `retrieval_detail`,
   `retrieved_count`, `blocked_count`), plus a `handle_new_user` trigger
   creating a `profiles` row on Supabase signup.
 - **Ingest** (`ingest.py`): txt/md/markdown/pdf/docx up to 20 MB; markdown
   formatting preserved; ~500-token chunks with 50-token overlap (tiktoken); embed
-  via Nemotron-3 Embed → 2048-dim.
+  via NV-embed-QA-E5-v5 → 1024-dim.
 - **NIM client** (`nim_client.py`): lazy client init, retry + 429 handling,
   `embed()`, `chat()`, `suggest_chunk_roles()` (single batched LLM call sized by
   `NIM_CHUNK_ROLE_BATCH_CHARS`, falls back to the doc's candidate roles on error).
