@@ -8,6 +8,7 @@ import os
 import asyncio
 import json
 import logging
+import math
 from pathlib import Path
 import httpx
 from dotenv import load_dotenv
@@ -18,7 +19,28 @@ load_dotenv(Path(__file__).parent / ".env", override=True)
 logger = logging.getLogger(__name__)
 
 NIM_BASE_URL = os.environ.get("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
-NIM_EMBED_MODEL = os.environ.get("NIM_EMBED_MODEL", "nvidia/nv-embedqa-e5-v5")
+# Embedding model + target dimensionality. The chunks.embedding column is
+# vector(1024), so the model must produce exactly 1024-dim output.
+#
+#   nvidia/llama-nemotron-embed-vl-1b-v2 is natively 2048-dimensional but
+#   supports Matryoshka (MRL) reduced dimensions via the OpenAI-compatible
+#   `dimensions` request parameter (see NVIDIA NeMo Retriever Embedding NIM
+#   docs, "How to Specify Dynamic Embedding Sizes"). Verified live 2026-09-02:
+#   dimensions=1024 returns exactly 1024 floats for input_type=passage|query.
+#   This is the only current-generation NVIDIA model still hosted on
+#   integrate.api.nvidia.com that supports 1024-dim output.
+#
+#   DO NOT set NIM_EMBED_MODEL to:
+#   - nvidia/llama-nemotron-embed-1b-v2 (DEPRECATED / removed from the hosted
+#     catalog)
+#   - nvidia/nemotron-3-embed-1b (2048-native ONLY — requesting
+#     dimensions=1024 there returns HTTP 400, and its native 2048 output
+#     cannot fit the vector(1024) column).
+NIM_EMBED_MODEL = os.environ.get("NIM_EMBED_MODEL", "nvidia/llama-nemotron-embed-vl-1b-v2")
+# Must match the pgvector column: embedding vector(1024). Used identically for
+# BOTH passage (ingestion) and query (search) embeddings so the two always
+# share the same model, dimension, and normalization behavior.
+NIM_EMBED_DIM = int(os.environ.get("NIM_EMBED_DIM", "1024"))
 NIM_CHAT_MODEL = os.environ.get("NIM_CHAT_MODEL", "meta/llama-3.1-8b-instruct")
 # NIM reranker. Verified live against a real call:
 #   POST https://ai.api.nvidia.com/v1/retrieval/nvidia/reranking  (HTTP 200)
@@ -180,8 +202,59 @@ async def _request_with_retry(
 # ---------------- Public API ----------------
 
 
+def _l2_normalize(vec: list[float]) -> list[float]:
+    """Return vec scaled to unit L2 norm (unchanged if the norm is zero)."""
+    norm = math.sqrt(sum(x * x for x in vec))
+    if norm <= 0.0:
+        return vec
+    return [x / norm for x in vec]
+
+
+def _fit_dimensions(vec: list[float]) -> list[float]:
+    """Force one embedding to exactly NIM_EMBED_DIM dims, normalized.
+
+    Primary path: the /embeddings request carries ``dimensions: NIM_EMBED_DIM``,
+    so the API already returns the right size (llama-nemotron-embed-vl-1b-v2
+    supports MRL reduced dimensions). Normalizing unconditionally keeps passage
+    and query embeddings on identical normalization behavior regardless of
+    server-side configuration.
+
+    Defense-in-depth (NVIDIA-documented fallback): if a deployment ignores the
+    ``dimensions`` parameter and returns a LONGER vector, slice the leading
+    components and L2-normalize the sliced vector again — NVIDIA's documented
+    procedure for reducing a Matryoshka (MRL) embedding outside the API. A
+    SHORT vector cannot be repaired and fails loudly rather than being padded
+    into a semantically meaningless row in the vector(1024) column.
+    """
+    dim = len(vec)
+    if dim == NIM_EMBED_DIM:
+        return _l2_normalize(vec)
+    if dim > NIM_EMBED_DIM:
+        logger.warning(
+            "NIM returned %d-dim embeddings but NIM_EMBED_DIM=%d was requested; "
+            "slicing + L2 re-normalizing per the MRL procedure. Verify NIM_EMBED_MODEL "
+            "(%s) supports dimensions=%d.",
+            dim, NIM_EMBED_DIM, NIM_EMBED_MODEL, NIM_EMBED_DIM,
+        )
+        return _l2_normalize(vec[:NIM_EMBED_DIM])
+    raise HTTPException(
+        status_code=502,
+        detail=(
+            f"NIM returned {dim}-dim embeddings but NIM_EMBED_DIM={NIM_EMBED_DIM} "
+            f"was requested (model {NIM_EMBED_MODEL}). Check NIM_EMBED_MODEL / NIM_EMBED_DIM."
+        ),
+    )
+
+
 async def embed(texts: list[str], input_type: str = "passage") -> list[list[float]]:
-    """Batch-embed a list of texts. NIM E5 requires input_type=passage|query."""
+    """Batch-embed texts at exactly NIM_EMBED_DIM dimensions (default 1024).
+
+    Single embedding path for the whole app: ingestion calls this with
+    ``input_type="passage"`` and chat/search with ``input_type="query"``, so
+    both always use the same model (NIM_EMBED_MODEL), the same dimension
+    (NIM_EMBED_DIM, sent as the MRL ``dimensions`` request parameter), and the
+    same normalization (unit L2 norm). NIM requires input_type=passage|query.
+    """
     if not texts:
         return []
     batch_size = 32
@@ -197,9 +270,12 @@ async def embed(texts: list[str], input_type: str = "passage") -> list[list[floa
                 "input_type": input_type,
                 "encoding_format": "float",
                 "truncate": "END",
+                # MRL reduced-dimension request. Must stay identical across
+                # passage and query calls (also required for NIM dynamic batching).
+                "dimensions": NIM_EMBED_DIM,
             },
         )
-        all_embeddings.extend(d["embedding"] for d in data["data"])
+        all_embeddings.extend(_fit_dimensions(d["embedding"]) for d in data["data"])
     return all_embeddings
 
 
