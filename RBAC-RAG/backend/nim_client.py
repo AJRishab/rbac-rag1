@@ -27,7 +27,10 @@ NIM_CHAT_MODEL = os.environ.get("NIM_CHAT_MODEL", "meta/llama-3.1-8b-instruct")
 #   response: {"rankings":[{"index": N, "logit": <float>}, ...]} — the score
 #   field is `logit` (a raw cross-entropy logit; monotonic with relevance),
 #   which rerank() parses below.
-NIM_RERANK_MODEL = os.environ.get("NIM_RERANK_MODEL", "nv-rerank-qa-mistral-4b:1")
+NIM_RERANK_MODEL = os.environ.get(
+    "NIM_RERANK_MODEL",
+    "nvidia/llama-nemotron-rerank-vl-1b-v2"
+)
 
 # Base HOST of the reranker endpoint. The reranker is served from a DIFFERENT
 # host (ai.api.nvidia.com) than the chat/embed NIM_BASE_URL
@@ -39,8 +42,8 @@ NIM_RERANK_BASE_URL = (
     os.environ.get("NIM_RERANK_BASE_URL")
     or "https://ai.api.nvidia.com"
 ).rstrip("/")
-# Canonical rerank route appended to NIM_RERANK_BASE_URL.
-NIM_RERANK_PATH = "/v1/retrieval/nvidia/reranking"
+
+NIM_RERANK_PATH = "/v1/retrieval/nvidia/llama-nemotron-rerank-vl-1b-v2/reranking"
 
 
 def _rerank_endpoint() -> str:
