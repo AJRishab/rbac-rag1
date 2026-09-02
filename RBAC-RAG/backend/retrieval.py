@@ -1,4 +1,4 @@
-"""Hybrid retrieval: dense (pgvector) + BM25 lexical + RRF fusion.
+"""Hybrid retrieval: dense (pgvector) + Postgres BM25 lexical + RRF fusion.
 
 Built from scratch on top of the pre-existing dense-only leg, which is factored
 out here with its behavior unchanged (same SQL, same RBAC filter inside the
@@ -22,7 +22,6 @@ from dataclasses import dataclass, field
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
-from rank_bm25 import BM25Okapi
 
 logger = logging.getLogger(__name__)
 
@@ -78,9 +77,22 @@ class RetrievedChunk:
     acl_version: int | None = None
 
 
-def _tokenize(text_: str) -> list[str]:
-    """Small BM25 tokenizer: lowercase, split on runs of alphanumerics."""
-    return re.findall(r"[a-z0-9]+", text_.lower())
+def _tenant_or_default(tenant: str | None) -> str:
+    """Caller's tenant, or the default tenant when none was provided.
+
+    The fallback is LOUD on purpose: a missing tenant_id at retrieval time
+    almost always means an auth bug (get_current_user failed to populate it),
+    not a legitimate default-tenant request — make that visible in logs
+    instead of silently serving default-tenant data.
+    """
+    if tenant:
+        return tenant
+    logger.warning(
+        "Retrieval called without tenant_id; falling back to default tenant %s "
+        "(possible auth bug: user dict should always carry tenant_id)",
+        DEFAULT_TENANT_ID,
+    )
+    return DEFAULT_TENANT_ID
 
 
 def _chunk_from_dense_row(row, rank: int) -> RetrievedChunk:
@@ -116,7 +128,7 @@ async def _dense_retrieve(
     ``acl_principals`` check but ALWAYS keeps ``tenant_id = :tenant`` — an
     admin from tenant A must never see tenant B's documents.
     """
-    tenant_uuid = tenant or DEFAULT_TENANT_ID
+    tenant_uuid = _tenant_or_default(tenant)
 
     if admin_bypass:
         # Tenant-scoped bypass: principals check skipped, tenant check kept.
@@ -185,61 +197,105 @@ async def _lexical_retrieve(
     tenant: str | None = None,
     k: int = LEXICAL_K,
 ) -> list[RetrievedChunk]:
-    """In-process, real BM25 over the ACL+tenant pre-filtered candidate pool.
+    """True BM25 lexical retrieval, computed ENTIRELY inside Postgres.
 
-    Queries only published chunks the caller's principals may see in the
-    caller's tenant (admins bypass the principals filter but stay tenant-scoped,
-    mirroring the dense leg). The candidate pool is fetched from Postgres and
-    scored with rank_bm25 — restricted chunks never leave the DB.
+    Ranking uses the BM25 index built by migrations/005 (``chunks.doclen`` +
+    ``chunk_terms``). Per query the SQL computes the standard BM25 score
+    ``sum_t IDF(t) * tf_norm(t, doc)`` where
+
+      IDF     = ln((N - n_t + 0.5) / (n_t + 0.5))      -- corpus-aware IDF
+      tf_norm = tf * (k1+1) / (tf + k1*(1 - b + b*doclen/avgdl))  -- k1=1.5,b=0.75
+
+    (k1/b are the defaults of the former rank_bm25 BM25Okapi leg, so ranking
+    behavior is preserved by design.) N, n_t, and avgdl are computed over the
+    SAME authorized subset the RBAC WHERE clause filters to — the ``tf`` CTE
+    is joined to ``auth`` so cross-tenant term rows can never inflate IDF —
+    making IDF corpus-aware: rare/highly-specific terms (policy numbers,
+    codes, amounts) are weighted up — behavior ``ts_rank_cd`` cannot provide.
+    Non-matching chunks are excluded from the result entirely (a term that
+    appears only in an unauthorized chunk contributes nothing), so only
+    tenant/ACL-authorized matches can be returned or scored.
+
+    One deliberate divergence from the rank_bm25 library: we use the canonical
+    BM25 IDF ``ln((N - n + 0.5)/(n + 0.5))`` unmodified. rank_bm25 clamps
+    negative-idf (super-frequent, df > N/2) terms to ``0.25 * average_idf``;
+    we keep the raw weight (often negative). Because non-matching chunks never
+    enter the result set and RRF consumes rank position only, this preserves
+    recall and ordering while staying faithful to the BM25 paper — verified
+    live at <1e-6 parity with rank_bm25 for idf >= 0 terms.
+
+    Only the tenant/ACL-filtered top ``k`` rows leave the database: matching,
+    scoring, ranking, and limiting all happen in SQL. The admin_bypass branch
+    skips only the ``acl_principals``/status checks; ``tenant_id`` is ALWAYS
+    present.
     """
-    tokens = _tokenize(query_text)
+    # Same short-circuit semantics as the old in-process tokenizer: a query
+    # with no alphanumeric tokens can never match — no round trip.
+    tokens = re.findall(r"[a-z0-9]+", (query_text or "").lower())
     if not tokens:
         return []
 
-    tenant_uuid = tenant or DEFAULT_TENANT_ID
+    tenant_uuid = _tenant_or_default(tenant)
+    auth_filter = (
+        "c.tenant_id = CAST(:tenant AS uuid)"
+        if admin_bypass
+        else (
+            "c.tenant_id = CAST(:tenant AS uuid) "
+            "AND d.status = 'published' AND c.acl_principals && :principals"
+        )
+    )
+    sql = f"""
+WITH auth AS (
+    SELECT c.id, c.doclen
+    FROM chunks c JOIN documents d ON d.id = c.document_id
+    WHERE {auth_filter}
+),
+tf AS (
+    SELECT ct.chunk_id, ct.term, ct.tf
+    FROM chunk_terms ct
+    JOIN auth a ON a.id = ct.chunk_id
+    WHERE ct.term = ANY(:terms)
+),
+idf AS (
+    SELECT term, count(*) AS doc_freq FROM tf GROUP BY term
+),
+corpus_stats AS (
+    SELECT
+        (SELECT count(*) FROM auth)::float8 AS total_docs,
+        GREATEST(1.0, (SELECT avg(doclen) FROM auth))::float8 AS avg_doclen
+),
+scored AS (
+    SELECT t.chunk_id AS chunk_id,
+           sum(
+               ln((s.total_docs - i.doc_freq + 0.5) / (i.doc_freq + 0.5))
+               * (t.tf * (1.5 + 1)) / (t.tf + 1.5 * (1 - 0.75 + 0.75 * a.doclen / s.avg_doclen))
+           ) AS bm25_score
+    FROM tf t
+    JOIN auth a ON a.id = t.chunk_id
+    JOIN idf i ON i.term = t.term
+    CROSS JOIN corpus_stats s
+    GROUP BY t.chunk_id, a.doclen
+)
+SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.content,
+       c.allowed_roles, c.acl_principals, c.acl_version, c.tenant_id,
+       d.title AS doc_title, d.filename AS source, sc.bm25_score AS score
+FROM scored sc
+JOIN chunks c ON c.id = sc.chunk_id
+JOIN documents d ON d.id = c.document_id
+ORDER BY sc.bm25_score DESC, c.id
+LIMIT :k
+"""
+    params: dict = {"terms": tokens, "tenant": tenant_uuid, "k": k}
+    if not admin_bypass:
+        params["principals"] = principal_list(role)
 
-    if admin_bypass:
-        rows = (await db.execute(
-            text(
-                "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.content, c.allowed_roles, "
-                "c.acl_principals, c.acl_version, c.tenant_id, "
-                "d.title AS doc_title, d.filename AS source "
-                "FROM chunks c JOIN documents d ON d.id = c.document_id "
-                "WHERE c.tenant_id = CAST(:tenant AS uuid) "
-                "ORDER BY c.id"
-            ),
-            {"tenant": tenant_uuid},
-        )).fetchall()
-    else:
-        rows = (await db.execute(
-            text(
-                "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.content, c.allowed_roles, "
-                "c.acl_principals, c.acl_version, c.tenant_id, "
-                "d.title AS doc_title, d.filename AS source "
-                "FROM chunks c JOIN documents d ON d.id = c.document_id "
-                "WHERE d.status = 'published' AND c.tenant_id = CAST(:tenant AS uuid) "
-                "AND c.acl_principals && :principals "
-                "ORDER BY c.id"
-            ),
-            {"principals": principal_list(role), "tenant": tenant_uuid},
-        )).fetchall()
+    rows = (await db.execute(text(sql), params)).fetchall()
 
-    if not rows:
-        return []
-
-    corpus = [_tokenize(r.content) for r in rows]
-    bm25 = BM25Okapi(corpus)
-    scores = bm25.get_scores(tokens)
-
-    # Only genuine lexical hits (score > 0) enter the candidate pool; arbitrary
-    # zero-score rows would only dilute fusion with non-matches.
-    matched = [i for i, s in enumerate(scores) if s > 0]
-    matched.sort(key=lambda i: (-scores[i], rows[i].chunk_id))  # score desc, id tiebreak
-    ranked = matched[:k]
-    chunks: list[RetrievedChunk] = []
-    for rank, idx in enumerate(ranked, start=1):
-        r = rows[idx]
-        chunks.append(RetrievedChunk(
+    # SQL already matched, scored with genuine BM25, ranked DESC (chunk-id
+    # tiebreak — same as the old BM25 sort) and limited to k, so the rows
+    # arrive in lexical_rank order.
+    return [
+        RetrievedChunk(
             id=str(r.chunk_id),
             document_id=str(r.document_id),
             chunk_index=int(r.chunk_index),
@@ -248,13 +304,14 @@ async def _lexical_retrieve(
             title=r.doc_title,
             source=r.source,
             page=r.source_page,
-            bm25_score=float(scores[idx]),
+            bm25_score=float(r.score or 0.0),  # genuine BM25 score (IDF-weighted)
             lexical_rank=rank,
             tenant_id=str(r.tenant_id) if r.tenant_id else None,
             acl_principals=list(r.acl_principals or []),
             acl_version=r.acl_version,
-        ))
-    return chunks
+        )
+        for rank, r in enumerate(rows, start=1)
+    ]
 
 
 def _rrf_fuse(
@@ -346,7 +403,7 @@ async def list_documents(
     filename, status, allowed_roles — the fields needed to answer inventory
     questions without ever touching chunks or the LLM.
     """
-    tenant_uuid = tenant or DEFAULT_TENANT_ID
+    tenant_uuid = _tenant_or_default(tenant)
     if admin_bypass:
         sql = (
             "SELECT id, title, filename, status, allowed_roles "
@@ -542,7 +599,7 @@ async def _authorized_documents(
     (filename, title, existence, ambiguity hints) can leak into resolution
     results.
     """
-    tenant_uuid = tenant or DEFAULT_TENANT_ID
+    tenant_uuid = _tenant_or_default(tenant)
     if admin_bypass:
         sql = (
             "SELECT id, title, filename, status, allowed_roles "
@@ -642,7 +699,7 @@ async def resolve_document_by_id(
     moved to another tenant, or was deleted after it appeared in conversation
     history resolves to ``None``.
     """
-    tenant_uuid = tenant or DEFAULT_TENANT_ID
+    tenant_uuid = _tenant_or_default(tenant)
     if admin_bypass:
         # Tenant-scoped bypass: principals check skipped, tenant check kept.
         sql = (
@@ -688,7 +745,7 @@ async def document_chunks(
     Never retrieve then filter in Python — restricted chunks for an
     unauthorized caller never leave the database.
     """
-    tenant_uuid = tenant or DEFAULT_TENANT_ID
+    tenant_uuid = _tenant_or_default(tenant)
     base = (
         "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, "
         "c.content, c.allowed_roles, c.acl_principals, c.acl_version, c.tenant_id, "

@@ -825,3 +825,102 @@ def test_user_approve_and_role_update_are_audited():
     assert audits2 and audits2[0]["tt"] == "user" and audits2[0]["ti"] == "u-a1"
     detail2 = json.loads(audits2[0]["d"])
     assert detail2["old_role"] == "manager" and detail2["new_role"] == "hr"
+
+
+# ---------------- persisted full-text lexical leg (migration 004) ----------------
+
+
+def test_lexical_matches_ranks_limits_inside_postgres():
+    """The lexical leg is one SQL statement doing TRUE BM25 (not ts_rank_cd):
+    term-frequency table + doclen + corpus-aware IDF, ORDER BY score, LIMIT."""
+    db = FakeDb()
+    run(R._lexical_retrieve(db, "policy 44-B/2026 premium", "manager", False, tenant=TENANT_A))
+    assert len(db.statements) == 1                     # single round trip
+    sql = db.statements[0]
+    # BM25 machinery is in the SQL...
+    assert "chunk_terms" in sql
+    assert "c.doclen" in sql
+    assert "ln((s.total_docs - i.doc_freq + 0.5) / (i.doc_freq + 0.5))" in sql   # IDF
+    assert "t.tf * (1.5 + 1)) / (t.tf + 1.5 * (1 - 0.75" in sql                   # k1=1.5,b=0.75
+    assert "avg_doclen" in sql
+    assert "GROUP BY t.chunk_id, a.doclen" in sql
+    assert "ORDER BY sc.bm25_score DESC" in sql
+    assert "LIMIT :k" in sql
+    # ...and ts_rank_cd / tsvector / tsquery are NOT.
+    for banned in ("ts_rank_cd", "search_vector", "to_tsquery", "websearch_to_tsquery", "ts_rank"):
+        assert banned not in sql, f"lexical leg must not use {banned}"
+    # IDF is computed over the AUTHORIZED corpus only (tf restricted to auth),
+    # so cross-tenant term rows can never inflate doc_freq.
+    assert "JOIN auth a ON a.id = ct.chunk_id" in sql
+    # tenant/ACL filter shape unchanged by the rewrite
+    assert "c.tenant_id = CAST(:tenant AS uuid)" in sql
+    assert "c.acl_principals && :principals" in sql
+    assert "d.status = 'published'" in sql
+    # Query terms go through a typed bind param (:terms), not into SQL text.
+    assert db.params[0]["terms"] == ["policy", "44", "b", "2026", "premium"]
+    assert db.params[0]["k"] == R.LEXICAL_K
+    assert db.params[0]["tenant"] == TENANT_A
+
+
+def test_lexical_terms_bind_param_is_injection_safe():
+    """Only [a-z0-9]+ tokens reach the :terms bind param — no operators,
+    quotes, keyword punctuation, or SQL can be smuggled into the query text."""
+    db = FakeDb()
+    run(R._lexical_retrieve(db, "premium'); DROP TABLE chunks; --", "manager", False, tenant=TENANT_A))
+    sql = db.statements[0]
+    assert db.params[0]["terms"] == ["premium", "drop", "table", "chunks"]
+    assert "DROP" not in sql.upper()
+    assert "chunks; --" not in sql.lower()
+    assert ":terms" in sql   # tokens appear only behind the bind placeholder
+
+
+def test_lexical_admin_bypass_tenant_scoped_bm25():
+    db = FakeDb()
+    run(R._lexical_retrieve(db, "insurance policy details", "admin", True, tenant=TENANT_A))
+    sql = db.statements[0]
+    assert "c.tenant_id = CAST(:tenant AS uuid)" in sql       # bypass keeps tenant scoping
+    assert "acl_principals &&" not in sql                      # and skips only principals
+    assert "d.status = 'published'" not in sql                 # (status too)
+    # Real BM25 either way
+    assert "chunk_terms" in sql and "ln((s.total_docs" in sql
+    assert "ts_rank_cd" not in sql
+    assert "LIMIT :k" in sql
+    assert db.params[0]["tenant"] == TENANT_A
+
+
+def test_lexical_empty_query_short_circuits_without_round_trip():
+    """Empty / punctuation-only queries short-circuit — no SQL at all."""
+    db = FakeDb()
+    for q in ("", "   ", "!!! ??? ...", None):
+        assert run(R._lexical_retrieve(db, q, "manager", False, tenant=TENANT_A)) == []
+    assert db.statements == []
+
+
+def test_lexical_rows_arrive_in_sql_rank_order():
+    """SQL returns BM25-ranked rows; the app assigns lexical_rank by arrival
+    order. RRF consumes the rank positions (not the score) — the BM25 value is
+    carried as metadata only."""
+    def row(cid, score):
+        return types.SimpleNamespace(
+            chunk_id=cid, document_id="d1", chunk_index=0, source_page=1,
+            content=f"content {cid}", allowed_roles=["manager"],
+            acl_principals=["role:manager"], acl_version=3, tenant_id=TENANT_A,
+            doc_title="T", source="0067.pdf", score=score,
+        )
+    db = FakeDb([FakeResult([row(2, 2.7), row(1, 1.2), row(9, 0.4)])])
+    chunks = run(R._lexical_retrieve(db, "anything", "manager", False, tenant=TENANT_A, k=3))
+    assert [c.id for c in chunks] == ["2", "1", "9"]          # SQL order preserved
+    assert [c.lexical_rank for c in chunks] == [1, 2, 3]       # what RRF actually consumes
+    assert chunks[0].bm25_score == pytest.approx(2.7)          # genuine BM25 score, metadata only
+    assert chunks[0].acl_version == 3
+    assert chunks[0].acl_principals == ["role:manager"]
+
+
+def test_rank_bm25_dependency_removed():
+    """The in-process BM25 implementation is gone (a docstring mention of the
+    old scorer is fine — the import and any BM25Okapi call are not)."""
+    assert not hasattr(R, "_tokenize")
+    import inspect
+    src = inspect.getsource(R)
+    assert "from rank_bm25" not in src
+    assert "BM25Okapi(" not in src
