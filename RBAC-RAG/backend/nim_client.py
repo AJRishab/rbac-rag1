@@ -46,6 +46,13 @@ NIM_EMBED_DIM = int(os.environ.get("NIM_EMBED_DIM", "1024"))
 # integrate.api.nvidia.com. nvidia/nemotron-3.5-lightning-30b-a3b is a
 # currently-cataloged, live-verified chat model on the same endpoint.
 NIM_CHAT_MODEL = os.environ.get("NIM_CHAT_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b")
+# Disable chain-of-thought ("thinking") for chat calls by default: every chat()
+# caller needs extractive/structured output (RAG answers, summaries, JSON), and
+# reasoning models spend output tokens (and can leak partial CoT into content
+# when truncated) on it. Set NIM_CHAT_THINKING=true to restore model default.
+NIM_CHAT_THINKING = os.environ.get("NIM_CHAT_THINKING", "false").strip().lower() in ("1", "true", "yes")
+# Hard ceiling for the truncated-response retry ladder in chat().
+_CHAT_MAX_TOKEN_CAP = 8192
 # NIM reranker. Verified live against a real call:
 #   POST https://ai.api.nvidia.com/v1/retrieval/nvidia/reranking  (HTTP 200)
 #   model: nv-rerank-qa-mistral-4b:1  (short name + ":1" version suffix —
@@ -284,21 +291,61 @@ async def embed(texts: list[str], input_type: str = "passage") -> list[list[floa
 
 
 async def chat(system: str, user: str, max_tokens: int = 700, temperature: float = 0.2) -> str:
-    data = await _request_with_retry(
-        "POST",
-        f"{NIM_BASE_URL}/chat/completions",
-        json_body={
-            "model": NIM_CHAT_MODEL,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "temperature": temperature,
-            "top_p": 0.9,
-            "max_tokens": max_tokens,
-        },
+    """One-shot chat completion used by answers, summaries and JSON tasks.
+
+    Two protections keep internal model reasoning OUT of user-visible output:
+
+    1. ``chat_template_kwargs: {"thinking": false}`` — the hosted Nemotron
+       chat models are reasoning models that emit chain-of-thought before the
+       answer. Every caller here needs extractive/structured output only, so
+       thinking is disabled by default (set NIM_CHAT_THINKING=true to restore
+       the model default).
+    2. ``finish_reason`` guard — when a reasoning model exhausts ``max_tokens``
+       mid-thought, NIM returns ``finish_reason="length"`` and puts the PARTIAL
+       CHAIN-OF-THOUGHT into ``message.content``. That text is never returned
+       to callers: the request is retried with a larger budget and, if it
+       still cannot complete, fails with a clean 502 instead of leaking.
+    """
+    body = {
+        "model": NIM_CHAT_MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": temperature,
+        "top_p": 0.9,
+        "max_tokens": max_tokens,
+    }
+    if not NIM_CHAT_THINKING:
+        body["chat_template_kwargs"] = {"thinking": False}
+
+    budget = max_tokens
+    for _attempt in range(3):
+        data = await _request_with_retry(
+            "POST",
+            f"{NIM_BASE_URL}/chat/completions",
+            json_body={**body, "max_tokens": budget},
+        )
+        choice = (data.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        content = message.get("content") or ""
+        finish = choice.get("finish_reason")
+        if finish == "stop" and content.strip():
+            return content
+        if finish == "length" and budget < _CHAT_MAX_TOKEN_CAP:
+            logger.warning(
+                "NIM chat response truncated mid-generation (finish_reason=length, "
+                "max_tokens=%d); retrying with a larger budget so no partial "
+                "reasoning can leak into the answer",
+                budget,
+            )
+            budget = min(budget * 2, _CHAT_MAX_TOKEN_CAP)
+            continue
+        break
+    raise HTTPException(
+        status_code=502,
+        detail="The AI service returned an incomplete response. Please try again.",
     )
-    return data["choices"][0]["message"]["content"]
 
 
 async def rerank(query: str, documents: list[str], top_n: int = 50) -> list[dict]:

@@ -398,3 +398,132 @@ def test_contextual_summary_resolves_single_document():
     assert am.content == "CONTEXTUAL SUMMARY"
     assert am.retrieval_detail["pipeline"]["filename"] == "0067-pdf.pdf"
     assert any("allowed_roles && ARRAY[:role]" in s for s in db.statements)
+
+
+# ---------------- section-scoped summaries ("summarize the abstract") ----------------
+
+
+def test_section_extraction():
+    assert R.document_section("Summarize the abstract") == "abstract"
+    assert R.document_section("Summarize the abstract of 1706.03762v7.pdf") == "abstract"
+    assert R.document_section("summarize the conclusion of 0067") == "conclusion"
+    assert R.document_section("summarize the 067 pdf") is None
+    assert R.document_section("summarize the report") is None
+    assert R.document_section("What documents are in the knowledge base?") is None
+
+
+def test_section_only_question_routes_to_summary_path():
+    assert R.is_document_summary_question("Summarize the abstract") is True
+    assert R.is_document_summary_question("summarize the introduction of 0067-pdf.pdf") is True
+    # No summary intent -> stays on the normal RAG path even with a section word.
+    assert R.is_document_summary_question("What does the introduction say about X?") is False
+    assert R.is_document_summary_question("How many documents mention the Mendoza Review?") is False
+
+
+def test_select_section_chunks_contiguous_run():
+    abstract = _rk(0, text=(
+        "Attention Is All You Need\n\nAbstract\n\n"
+        "We propose the Transformer, a sequence transduction model based entirely on attention. "
+    ))
+    intro = _rk(1, text="1 Introduction\n\nRecurrent neural models dominate sequence transduction. ")
+    arch = _rk(2, text="2 Model Architecture\n\nMost competitive models are encoder-decoders. ")
+    chunks = [abstract, intro, arch]
+
+    sel = S.select_section_chunks(chunks, "abstract")
+    assert [c.chunk_index for c in sel] == [0]
+
+    sel_intro = S.select_section_chunks(chunks, "introduction")
+    assert [c.chunk_index for c in sel_intro] == [1]  # stops before "2 Model Architecture"
+
+
+def test_select_section_chunks_multi_chunk_and_caps():
+    sec0 = _rk(0, text="Introduction\n\nFirst part of the introduction. ")
+    sec1 = _rk(1, text="More introduction detail without any heading. ")
+    next_sec = _rk(2, text="Conclusion\n\nWrap up. ")
+    sel = S.select_section_chunks([sec0, sec1, next_sec], "introduction")
+    assert [c.chunk_index for c in sel] == [0, 1]
+
+
+def test_select_section_chunks_not_found_returns_none():
+    chunks = [_rk(i, text="plain body text with no headings whatsoever. ") for i in range(3)]
+    assert S.select_section_chunks(chunks, "abstract") is None
+    assert S.select_section_chunks([], "abstract") is None
+
+
+def test_summarize_section_prompt_and_scope():
+    captured = []
+
+    async def fake_chat(system, user, max_tokens=700, temperature=0.2):
+        captured.append((system, user))
+        return "ABSTRACT SUMMARY"
+
+    with patch("document_summarizer.nim_client.chat", side_effect=fake_chat):
+        chunks = [
+            _rk(0, text="Abstract\n\nWe propose the Transformer model. "),
+            _rk(1, text="1 Introduction\n\nRecurrent models are slow. "),
+        ]
+        sel = S.select_section_chunks(chunks, "abstract")
+        summary, n, calls = run(S.summarize_document(
+            sel, {"id": "a", "title": "T", "filename": "1706.03762v7.pdf"}, False, section="abstract",
+        ))
+    assert summary == "ABSTRACT SUMMARY"
+    assert n == 1 and calls == 1
+    system, user = captured[0]
+    assert "'abstract'" in system                      # section-restricted prompt
+    assert "1 Introduction" not in user                # out-of-section content never sent
+
+
+def test_handler_section_scoped_summary_end_to_end():
+    filedoc = docrow("a1", "Attention Paper", "1706.03762v7.pdf", ["manager"])
+    db = FakeDb([
+        FakeResult([filedoc]),
+        FakeResult([
+            chunkrow(1, "a1", 0, "Attention Is All You Need\n\nAbstract\n\nWe propose the Transformer model.", ["manager"]),
+            chunkrow(2, "a1", 1, "1 Introduction\n\nRecurrent models dominate sequence transduction.", ["manager"]),
+        ]),
+    ])
+
+    async def fake_chat(system, user, max_tokens=700, temperature=0.2):
+        assert "'abstract'" in system
+        assert "1 Introduction" not in user
+        return "The paper introduces the Transformer, an attention-only architecture."
+
+    with patch("document_summarizer.nim_client.chat", side_effect=fake_chat):
+        resp = run(_handle_document_summary(
+            db, "conv-1", user_row(), "summarize the abstract of 1706.03762v7.pdf", "manager", False,
+        ))
+
+    am = resp.assistant_message
+    rd = am.retrieval_detail
+    assert rd["pipeline"]["section"] == "abstract"
+    assert rd["pipeline"]["section_found"] is True
+    assert rd["pipeline"]["chunk_count"] == 1          # ONLY the abstract chunk summarized
+    assert "Transformer" in am.content
+    # RBAC SQL still ran before any summarization happened.
+    assert any("allowed_roles && :r" in s or "allowed_roles && ARRAY[:role]" in s for s in db.statements)
+
+
+def test_handler_section_not_found_falls_back_to_full_document():
+    filedoc = docrow("a1", "Plain Doc", "0067-pdf.pdf", ["manager"])
+    db = FakeDb([
+        FakeResult([filedoc]),
+        FakeResult([
+            chunkrow(1, "a1", 0, "body text without headings one", ["manager"]),
+            chunkrow(2, "a1", 1, "body text without headings two", ["manager"]),
+        ]),
+    ])
+
+    async def fake_chat(system, user, max_tokens=700, temperature=0.2):
+        assert "'abstract'" not in system  # fallback prompt must not pretend a section exists
+        return "FULL DOCUMENT SUMMARY"
+
+    with patch("document_summarizer.nim_client.chat", side_effect=fake_chat):
+        resp = run(_handle_document_summary(
+            db, "conv-1", user_row(), "summarize the abstract of 0067-pdf.pdf", "manager", False,
+        ))
+
+    rd = resp.assistant_message.retrieval_detail
+    assert rd["pipeline"]["section"] == "abstract"
+    assert rd["pipeline"]["section_found"] is False
+    assert rd["pipeline"]["chunk_count"] == 2          # whole document summarized honestly
+    assert resp.assistant_message.content == "FULL DOCUMENT SUMMARY"

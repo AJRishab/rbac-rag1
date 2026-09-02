@@ -359,6 +359,49 @@ _RE_REF_GENERIC = re.compile(
 )
 _EXT_RE = re.compile(r"\.(?:pdf|docx?|txt|md|markdown)$")
 
+# Standard document-section names. Used for two things: extracting a requested
+# section from a summary question ("summarize the abstract") and recognizing a
+# section HEADING inside chunk text (document_summarizer.select_section_chunks).
+# The list is generic paper/report structure - deliberately NOT tied to any
+# specific document.
+SECTION_WORDS: tuple[str, ...] = (
+    "abstract", "executive summary", "introduction", "background",
+    "related work", "literature review", "methodology", "methods",
+    "materials and methods", "experimental setup", "experimental results",
+    "evaluation", "results", "analysis", "discussion", "conclusions",
+    "conclusion", "future work", "acknowledgements", "acknowledgments",
+    "references", "appendix",
+)
+_RE_SECTION = re.compile(
+    r"\b("
+    + "|".join(re.escape(w) for w in sorted(SECTION_WORDS, key=len, reverse=True))
+    + r")\b",
+    re.IGNORECASE,
+)
+
+
+def document_section(text: str) -> str | None:
+    """Extract a requested document-section name from a summary question.
+
+    ``"Summarize the abstract of 1706.03762v7.pdf"`` -> ``"abstract"``.
+    Returns ``None`` when no standard section is named, so ordinary
+    whole-document summaries and normal RAG questions are unaffected.
+    """
+    m = _RE_SECTION.search(text or "")
+    return m.group(1).lower() if m else None
+
+
+def section_heading_line_re(section: str) -> re.Pattern[str]:
+    """Standalone section-heading line matcher: 'Abstract', '1. Introduction',
+    'II. RELATED WORK', 'References:'. Tolerates numbering prefixes, an
+    optional trailing plural and punctuation. Mid-sentence mentions of the
+    word do NOT match (the heading must end the line)."""
+    esc = re.escape((section or "").strip()).replace(r"\ ", r"\s+")
+    return re.compile(
+        rf"^\s*(?:\d+(?:\.\d+)*[\.\)]?\s+|[ivxlc]+[\.\)]\s+)?{esc}s?\s*[:.\u2013\u2014-]?\s*$",
+        re.IGNORECASE,
+    )
+
 
 def _slug(value: str) -> str:
     """Lowercase + collapse non-alphanumerics to single '-' separators."""
@@ -398,6 +441,10 @@ def is_document_summary_question(text: str) -> bool:
         _RE_REF_FILENAME.search(t)
         or _RE_REF_NUMERIC.search(t)
         or _RE_REF_GENERIC.search(t)
+        # A named section ("summarize the abstract") is also a document-scoped
+        # summary request; the document resolves via conversation context like
+        # the generic "the report" form.
+        or document_section(t) is not None
     )
 
 

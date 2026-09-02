@@ -17,11 +17,11 @@ from retrieval import (
     hybrid_retrieve, assert_rbac, RetrievedChunk,
     DENSE_K, LEXICAL_K, FUSE_K, RRF_K,
     is_inventory_question, list_documents, format_document_inventory,
-    is_document_summary_question, document_reference,
+    is_document_summary_question, document_reference, document_section,
     resolve_document, resolve_document_by_id, document_chunks,
 )
 from reranker import rerank, RERANK_TOP_N
-from document_summarizer import summarize_document
+from document_summarizer import summarize_document, select_section_chunks
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
@@ -407,7 +407,20 @@ async def _handle_document_summary(
     # Defense-in-depth: chunk-level RBAC re-check (should never fire — SQL filtered).
     assert_rbac(chunks, role, admin_bypass)
 
-    summary, chunk_count, llm_calls = await summarize_document(chunks, doc, admin_bypass)
+    # Section scoping: "summarize the abstract" narrows the RBAC-verified chunk
+    # list to the named section's contiguous chunks (heading-based, generic —
+    # never fetch-then-authorize: selection only narrows an already-authorized
+    # list). If the document has no such heading, fall back to the WHOLE
+    # document summary rather than guessing or hallucinating a section.
+    section = document_section(question)
+    scoped = select_section_chunks(chunks, section) if section else None
+    section_found = scoped is not None
+    if section_found:
+        chunks = scoped
+
+    summary, chunk_count, llm_calls = await summarize_document(
+        chunks, doc, admin_bypass, section=section if section_found else None,
+    )
 
     citations = [{
         "document_id": doc["id"],
@@ -430,6 +443,8 @@ async def _handle_document_summary(
             "filename": doc["filename"],
             "chunk_count": chunk_count,
             "llm_calls": llm_calls,
+            "section": section,
+            "section_found": section_found,
             "reason": None,
         },
         "document_count": 1,
