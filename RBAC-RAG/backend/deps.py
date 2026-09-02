@@ -34,7 +34,7 @@ async def get_current_user(token: str | None = Depends(oauth2_scheme), db: Async
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
     result = await db.execute(
-        text("SELECT id, email, role, status, must_change_password, created_at FROM profiles WHERE id = CAST(:i AS uuid)"),
+        text("SELECT id, email, role, status, must_change_password, created_at, tenant_id FROM profiles WHERE id = CAST(:i AS uuid)"),
         {"i": user_id},
     )
     row = result.first()
@@ -48,6 +48,7 @@ async def get_current_user(token: str | None = Depends(oauth2_scheme), db: Async
         "status": row.status,
         "must_change_password": row.must_change_password,
         "created_at": row.created_at,
+        "tenant_id": str(row.tenant_id) if row.tenant_id else None,
     }
 
 

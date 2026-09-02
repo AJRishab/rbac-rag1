@@ -6,14 +6,25 @@ integrity, contextual references, and regressions for corpus-inventory and
 normal RAG. Uses fake DB results and patched NIM calls - no live network.
 """
 import asyncio
+import json
 import types
+from datetime import datetime
 from unittest.mock import patch
 
 import pytest
+from fastapi import HTTPException
 
 import retrieval as R
 import document_summarizer as S
+from routers import admin_router as AR
 from routers.chat_router import _handle_document_summary, _context_document_id
+from schemas import UpdateDocRolesRequest, UpdateChunkRolesRequest, ApproveUserRequest
+
+
+# Tenant fixtures: A is "ours", B is a foreign tenant no query may ever reach.
+DEFAULT_TENANT = "00000000-0000-0000-0000-000000000001"
+TENANT_A = "11111111-1111-1111-1111-111111111111"
+TENANT_B = "22222222-2222-2222-2222-222222222222"
 
 
 # ---------------- fakes ----------------
@@ -34,14 +45,16 @@ class FakeResult:
 
 
 class FakeDb:
-    """Queued results + captured SQL statements for the async code paths."""
+    """Queued results + captured SQL statements/params for the async code paths."""
 
     def __init__(self, queue=None, statements=None):
         self._queue = list(queue or [])
         self.statements = statements if statements is not None else []
+        self.params: list[dict | None] = []
 
     async def execute(self, stmt, params=None):
         self.statements.append(str(stmt))
+        self.params.append(dict(params) if params else None)
         stmt_s = str(stmt)
         if "INSERT INTO messages" in stmt_s and params and params.get("rd") is not None:
             import json as _json
@@ -61,17 +74,21 @@ class FakeDb:
         return None
 
 
-def docrow(did, title, filename, roles=None, status="published"):
+def docrow(did, title, filename, roles=None, status="published", tenant_id=DEFAULT_TENANT):
     return types.SimpleNamespace(
         id=did, title=title, filename=filename,
         allowed_roles=roles or [], status=status,
+        tenant_id=tenant_id, chunk_count=0, uploaded_at=datetime(2026, 1, 1),
+        uploaded_by="u1",
     )
 
 
-def chunkrow(cid, did, idx, content, roles=None, page=None):
+def chunkrow(cid, did, idx, content, roles=None, page=None, acl_version=1, tenant_id=DEFAULT_TENANT):
     return types.SimpleNamespace(
         chunk_id=cid, document_id=did, chunk_index=idx, source_page=page,
         content=content, allowed_roles=roles or [],
+        acl_principals=[f"role:{r}" for r in (roles or [])],
+        acl_version=acl_version, tenant_id=tenant_id,
         doc_title="Doc T", source="source.pdf",
     )
 
@@ -98,12 +115,15 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def _rk(i, roles=None, text=None):
+def _rk(i, roles=None, text=None, tenant=DEFAULT_TENANT):
     """RetrievedChunk helper."""
     return R.RetrievedChunk(
         id=str(i), document_id="d1", chunk_index=i,
         content=text or f"chunk number {i} with body text to pad the token count. " * 8,
-        allowed_roles=roles or ["manager"], title="Museums Matter, 2015",
+        allowed_roles=roles or ["manager"],
+        acl_principals=[f"role:{r}" for r in (roles or ["manager"])],
+        tenant_id=tenant,
+        title="Museums Matter, 2015",
         source="0067-pdf.pdf", page=i,
     )
 
@@ -170,7 +190,8 @@ def test_6_authorized_document_resolution_sql_is_rbac_filtered():
     run(R._authorized_documents(db, role="manager", admin_bypass=False))
     sql = db.statements[0]
     assert "status = 'published'" in sql
-    assert "allowed_roles && ARRAY[:role]" in sql
+    assert "acl_principals && :principals" in sql
+    assert "tenant_id = CAST(:tenant AS uuid)" in sql
 
 
 def test_6b_admin_resolution_bypasses_rbac():
@@ -193,11 +214,14 @@ def test_8_unauthorized_document_chunks_cannot_be_retrieved():
     run(R.document_chunks(db, "doc-1", role="hr", admin_bypass=False))
     sql = db.statements[0]
     assert "d.status = 'published'" in sql
-    assert "c.allowed_roles && :r" in sql
+    assert "c.acl_principals && :principals" in sql
+    assert "c.tenant_id = CAST(:tenant AS uuid)" in sql
     db2 = FakeDb()
     run(R.document_chunks(db2, "doc-1", role="admin", admin_bypass=True))
     sql2 = db2.statements[0]
-    assert "allowed_roles &&" not in sql2
+    # Admin bypass skips the principals FILTER but NEVER the tenant check.
+    assert "acl_principals &&" not in sql2
+    assert "c.tenant_id = CAST(:tenant AS uuid)" in sql2
     assert "published" not in sql2
 
 
@@ -215,7 +239,8 @@ def test_resolve_unique_and_by_id_reauthorization():
     assert [h["id"] for h in hits] == ["d1"]
     db2 = FakeDb()
     assert run(R.resolve_document_by_id(db2, "d1", role="hr", admin_bypass=False)) is None
-    assert "allowed_roles && ARRAY[:role]" in db2.statements[0]
+    assert "acl_principals && :principals" in db2.statements[0]
+    assert "tenant_id = CAST(:tenant AS uuid)" in db2.statements[0]
 
 
 def test_security_similar_filename_no_leak():
@@ -397,7 +422,8 @@ def test_contextual_summary_resolves_single_document():
     assert am.retrieval_detail["pipeline"]["mode"] == "document_summary"
     assert am.content == "CONTEXTUAL SUMMARY"
     assert am.retrieval_detail["pipeline"]["filename"] == "0067-pdf.pdf"
-    assert any("allowed_roles && ARRAY[:role]" in s for s in db.statements)
+    assert any("acl_principals && :principals" in s for s in db.statements)
+    assert any("tenant_id = CAST(:tenant AS uuid)" in s for s in db.statements)
 
 
 # ---------------- section-scoped summaries ("summarize the abstract") ----------------
@@ -500,7 +526,8 @@ def test_handler_section_scoped_summary_end_to_end():
     assert rd["pipeline"]["chunk_count"] == 1          # ONLY the abstract chunk summarized
     assert "Transformer" in am.content
     # RBAC SQL still ran before any summarization happened.
-    assert any("allowed_roles && :r" in s or "allowed_roles && ARRAY[:role]" in s for s in db.statements)
+    assert any("acl_principals && :principals" in s and "tenant_id = CAST(:tenant AS uuid)" in s
+               for s in db.statements)
 
 
 def test_handler_section_not_found_falls_back_to_full_document():
@@ -527,3 +554,274 @@ def test_handler_section_not_found_falls_back_to_full_document():
     assert rd["pipeline"]["section_found"] is False
     assert rd["pipeline"]["chunk_count"] == 2          # whole document summarized honestly
     assert resp.assistant_message.content == "FULL DOCUMENT SUMMARY"
+
+
+# ---------------- tenant isolation + principal ACLs + audit log ----------------
+
+
+def _admin(tenant=TENANT_A):
+    return {"id": "admin-1", "email": "a@x.io", "role": "admin", "status": "approved",
+            "must_change_password": False, "created_at": "2026-01-01T00:00:00Z", "tenant_id": tenant}
+
+
+def test_tenant_filter_on_chunk_reads_and_admin_bypass():
+    """Every chunk read is tenant-scoped; bypass drops only the principals check."""
+    db = FakeDb()
+    run(R.document_chunks(db, "doc-1", role="hr", admin_bypass=False, tenant=TENANT_A))
+    sql = db.statements[0]
+    assert "c.tenant_id = CAST(:tenant AS uuid)" in sql
+    assert "c.acl_principals && :principals" in sql
+    assert db.params[0]["tenant"] == TENANT_A
+
+    db2 = FakeDb()
+    run(R.document_chunks(db2, "doc-1", role="admin", admin_bypass=True, tenant=TENANT_A))
+    sql2 = db2.statements[0]
+    assert "c.tenant_id = CAST(:tenant AS uuid)" in sql2   # bypass keeps tenant scoping
+    assert "acl_principals &&" not in sql2                  # ...and skips only the principals filter
+    assert db2.params[0]["tenant"] == TENANT_A
+
+
+def test_dense_and_lexical_bypass_stay_tenant_scoped():
+    db = FakeDb()
+    run(R._dense_retrieve(db, "[0.1,0.2]", "admin", True, tenant=TENANT_A))
+    assert len(db.statements) == 1
+    assert "c.tenant_id = CAST(:tenant AS uuid)" in db.statements[0]
+    assert "acl_principals &&" not in db.statements[0]
+
+    db2 = FakeDb()
+    run(R._lexical_retrieve(db2, "insurance policy details", "admin", True, tenant=TENANT_A))
+    assert "c.tenant_id = CAST(:tenant AS uuid)" in db2.statements[0]
+    assert "acl_principals &&" not in db2.statements[0]
+
+
+def test_user_tenant_a_cannot_reach_tenant_b_documents():
+    """Resolution/inventory queries carry the caller's tenant, so tenant-B rows
+    can never match — not even with a byte-identical role. A cross-tenant
+    document is indistinguishable from a nonexistent one (no metadata leak)."""
+    db = FakeDb()
+    run(R.resolve_document(db, {"kind": "filename", "value": "b.pdf"}, "manager", False, tenant=TENANT_A))
+    sql = db.statements[0]
+    assert "tenant_id = CAST(:tenant AS uuid)" in sql
+    assert "acl_principals && :principals" in sql
+    assert db.params[0]["tenant"] == TENANT_A
+
+    # Admin resolution is tenant-scoped too (bypass keeps the tenant filter).
+    db2 = FakeDb()
+    run(R.resolve_document(db2, {"kind": "filename", "value": "b.pdf"}, "admin", True, tenant=TENANT_A))
+    assert "tenant_id = CAST(:tenant AS uuid)" in db2.statements[0]
+    assert db2.params[0]["tenant"] == TENANT_A
+
+
+def test_assert_rbac_flags_cross_tenant_chunk_like_role_mismatch():
+    ours = _rk(1)
+    R.assert_rbac([ours], role="manager", tenant=DEFAULT_TENANT)       # same tenant: ok
+    foreign = _rk(2, tenant=TENANT_B)
+    with pytest.raises(RuntimeError):
+        R.assert_rbac([foreign], role="manager", tenant=DEFAULT_TENANT)  # cross-tenant: raises
+    # Admin bypass (tenant enforced in SQL) still skips the in-memory check.
+    R.assert_rbac([foreign], role="manager", admin_bypass=True)
+
+
+def test_acl_version_visible_on_chunk_read_path():
+    db = FakeDb([FakeResult([chunkrow(7, "d1", 0, "content", ["manager"], acl_version=9)])])
+    chunks = run(R.document_chunks(db, "d1", role="manager", admin_bypass=False, tenant=DEFAULT_TENANT))
+    assert chunks[0].acl_version == 9
+    assert chunks[0].acl_principals == ["role:manager"]
+    assert chunks[0].tenant_id == DEFAULT_TENANT
+
+
+def test_acl_update_bumps_version_and_writes_audit():
+    db = FakeDb([
+        FakeResult([docrow("d1", "T", "0067-pdf.pdf", ["manager"])]),          # old roles
+        FakeResult([docrow("d1", "T", "0067-pdf.pdf", ["manager", "hr"])]),  # UPDATE ... RETURNING
+    ])
+    run(AR.update_document_roles("d1", UpdateDocRolesRequest(allowed_roles=["manager", "hr"]), _admin(), db))
+    joined = "\n".join(db.statements)
+    assert "acl_version = acl_version + 1" in joined          # document bumped
+    assert joined.count("acl_version = acl_version + 1") >= 2  # chunks bumped too
+    assert "acl_principals = :p" in joined
+    audits = [p for p in db.params if p and p.get("act") == "acl.update"]
+    assert audits, "no audit row written for acl.update"
+    ap = audits[0]
+    assert ap["tt"] == "document" and ap["ti"] == "d1"
+    assert ap["t"] == TENANT_A and ap["a"] == "admin-1"
+    assert json.loads(ap["d"])["new_roles"] == ["hr", "manager"]
+    assert json.loads(ap["d"])["old_roles"] == ["manager"]
+
+
+def test_chunk_acl_update_bumps_version_and_audits():
+    db = FakeDb([
+        FakeResult([docrow("d1", "T", "0067.pdf", ["manager"])]),                      # candidate
+        # UPDATE ... RETURNING row (id is the chunks bigserial id here)
+        FakeResult([types.SimpleNamespace(
+            id=7, chunk_index=0, content="content", allowed_roles=["manager"],
+            roles_ai_suggested=False, source_page=1,
+        )]),
+    ])
+    run(AR.update_chunk_roles("d1", 7, UpdateChunkRolesRequest(allowed_roles=["manager"]), _admin(), db))
+    joined = "\n".join(db.statements)
+    assert "acl_version = acl_version + 1" in joined
+    audits = [p for p in db.params if p and p.get("act") == "chunk.acl.update"]
+    assert audits and audits[0]["tt"] == "chunk" and audits[0]["ti"] == "7"
+    assert json.loads(audits[0]["d"])["old_roles"] == ["manager"]
+
+
+def test_audit_log_written_on_publish_and_delete():
+    db = FakeDb([FakeResult([docrow("d1", "T", "0067.pdf", ["manager"], status="published")])])
+    run(AR.publish_document("d1", _admin(), db))
+    audits = [p for p in db.params if p and p.get("act") == "document.publish"]
+    assert audits and audits[0]["tt"] == "document" and audits[0]["ti"] == "d1"
+    assert audits[0]["t"] == TENANT_A and audits[0]["a"] == "admin-1"
+
+    deleted = types.SimpleNamespace(id="d1", title="T", filename="0067.pdf", tenant_id=TENANT_A)
+    db2 = FakeDb([FakeResult([deleted])])
+    out = run(AR.delete_document("d1", _admin(), db2))
+    assert out == {"deleted": True, "id": "d1"}
+    audits2 = [p for p in db2.params if p and p.get("act") == "document.delete"]
+    assert audits2 and audits2[0]["ti"] == "d1"
+    # The delete audit names the DELETED doc's tenant (same as the admin's here).
+    assert audits2[0]["t"] == TENANT_A
+
+
+def test_upload_stamps_tenant_principals_and_audits():
+    db = FakeDb([FakeResult([docrow("d9", "T", "f.pdf", ["manager"])])])  # INSERT ... RETURNING
+    run(AR._persist_document(
+        db, "T", "f.pdf", "admin-1", ["manager"],
+        [("chunk text", 1)], [[0.1, 0.2, 0.3, 0.4]], [["manager"]],
+        tenant_id=TENANT_A,
+    ))
+    joined = "\n".join(db.statements)
+    assert "INSERT INTO documents" in joined and "tenant_id" in joined
+    assert "INSERT INTO chunks" in joined and "acl_principals" in joined
+    doc_insert, chunk_insert = db.params[0], db.params[1]
+    assert doc_insert["p"] == ["role:manager"] and doc_insert["tn"] == TENANT_A
+    assert chunk_insert["p"] == ["role:manager"] and chunk_insert["tn"] == TENANT_A
+    audits = [p for p in db.params if p and p.get("act") == "document.upload"]
+    assert audits and audits[0]["t"] == TENANT_A and audits[0]["a"] == "admin-1"
+    assert json.loads(audits[0]["d"])["chunk_count"] == 1
+
+
+def test_cross_tenant_admin_document_ops_return_404():
+    """Admin mutations are tenant-scoped: a foreign-tenant doc resolves to 404
+    (indistinguishable from nonexistent), never to a successful cross-tenant write."""
+    db = FakeDb()  # no rows -> SELECT/UPDATE/DELETE finds nothing for tenant A
+    with pytest.raises(Exception):
+        run(AR.publish_document("d-b", _admin(tenant=TENANT_A), db))
+    assert "tenant_id = CAST(:t AS uuid)" in db.statements[0]
+
+
+# ---------------- follow-up: user endpoints + chunk-listing tenant scoping ----------------
+
+
+def _userrow(uid, email, role, status, tenant=TENANT_A):
+    return types.SimpleNamespace(
+        id=uid, email=email, role=role, status=status,
+        must_change_password=False, created_at=datetime(2026, 1, 1), tenant_id=tenant,
+    )
+
+
+class TenantFilteringFakeDb(FakeDb):
+    """FakeDb that emulates the real SQL tenant filter for profiles/documents
+    result rows, so tests can prove tenant-B rows in the fixture are NOT
+    returned to a tenant-A admin (the plain FakeDb returns everything)."""
+
+    async def execute(self, stmt, params=None):
+        self.statements.append(str(stmt))
+        self.params.append(dict(params) if params else None)
+        s = str(stmt)
+        result = self._queue.pop(0) if self._queue else FakeResult()
+        tenant = (params or {}).get("t")
+        if tenant and hasattr(result, "_rows"):
+            result._rows = [r for r in result._rows if str(getattr(r, "tenant_id", "")) == tenant]
+        return result
+
+
+def test_list_document_chunks_cross_tenant_404_not_content():
+    """Gap 1 regression: a tenant-A admin listing chunks of a tenant-B document
+    gets a 404 — never the chunk content."""
+    db = FakeDb()  # existence check finds no tenant-A document -> 404
+    with pytest.raises(HTTPException) as exc:
+        run(AR.list_document_chunks("doc-b", _admin(tenant=TENANT_A), db))
+    assert exc.value.status_code == 404
+    joined = "\n".join(db.statements)
+    assert "d.tenant_id = CAST(:t AS uuid)" in joined        # chunks query scoped
+    assert "tenant_id = CAST(:t AS uuid)" in joined          # existence check scoped
+    assert db.params[0]["t"] == TENANT_A and db.params[1]["t"] == TENANT_A
+
+
+def test_list_document_chunks_returns_own_tenant_chunks():
+    chunk = types.SimpleNamespace(
+        id=7, chunk_index=0, content="own-tenant chunk content", allowed_roles=["manager"],
+        roles_ai_suggested=True, source_page=1, filename="0067.pdf",
+    )
+    exists_row = types.SimpleNamespace(tenant_id=TENANT_A)
+    db = FakeDb([FakeResult([chunk]), FakeResult([exists_row])])
+    out = run(AR.list_document_chunks("d1", _admin(tenant=TENANT_A), db))
+    assert len(out) == 1 and out[0].content == "own-tenant chunk content"
+    assert "d.tenant_id = CAST(:t AS uuid)" in db.statements[0]
+    assert db.params[0]["t"] == TENANT_A
+
+
+def test_list_users_tenant_scoped_even_when_tenant_b_users_exist():
+    """Gap 2 regression: a tenant-A admin sees ONLY tenant-A users, even though
+    tenant-B users exist in the fixture data."""
+    users = [
+        _userrow("u-a1", "a1@x.io", "manager", "approved", tenant=TENANT_A),
+        _userrow("u-b1", "b1@other.io", "admin", "approved", tenant=TENANT_B),
+        _userrow("u-b2", "b2@other.io", "hr", "pending", tenant=TENANT_B),
+    ]
+    db = TenantFilteringFakeDb([FakeResult(users)])
+    out = run(AR.list_users(_admin(tenant=TENANT_A), db))
+    assert [u.id for u in out] == ["u-a1"]          # tenant-B users invisible
+    assert all("other.io" not in u.email for u in out)
+    assert "tenant_id = CAST(:t AS uuid)" in db.statements[0]
+    assert db.params[0]["t"] == TENANT_A
+
+
+def test_user_mutations_cross_tenant_404_and_never_touch_target():
+    """A tenant-A admin cannot approve or promote a tenant-B user: 404, no
+    audit row, and the fixture's target user row is untouched."""
+    target = _userrow("u-b1", "b1@other.io", "employee", "pending", tenant=TENANT_B)
+
+    db = FakeDb()  # tenant-scoped SELECT finds nothing -> 404, no UPDATE at all
+    with pytest.raises(HTTPException) as exc:
+        run(AR.approve_user("u-b1", ApproveUserRequest(role="admin"), _admin(tenant=TENANT_A), db))
+    assert exc.value.status_code == 404
+    assert "tenant_id = CAST(:t AS uuid)" in db.statements[0]
+    assert db.params[0]["t"] == TENANT_A
+    assert not any("UPDATE profiles" in s for s in db.statements)   # never mutated
+    assert not any("INSERT INTO audit_log" in s for s in db.statements)
+
+    db2 = FakeDb()  # same for change_user_role
+    with pytest.raises(HTTPException) as exc2:
+        run(AR.change_user_role("u-b1", ApproveUserRequest(role="admin"), _admin(tenant=TENANT_A), db2))
+    assert exc2.value.status_code == 404
+    assert not any("UPDATE profiles" in s for s in db2.statements)
+    # target row unchanged (the handler never got past the scoped SELECT)
+    assert (target.role, target.status) == ("employee", "pending")
+
+
+def test_user_approve_and_role_update_are_audited():
+    old = _userrow("u-a1", "a1@x.io", "employee", "pending", tenant=TENANT_A)
+    updated = _userrow("u-a1", "a1@x.io", "manager", "approved", tenant=TENANT_A)
+
+    # approve_user
+    db = FakeDb([FakeResult([old]), FakeResult([updated])])
+    out = run(AR.approve_user("u-a1", ApproveUserRequest(role="manager"), _admin(tenant=TENANT_A), db))
+    assert out.role == "manager" and out.status == "approved"
+    audits = [p for p in db.params if p and p.get("act") == "user.approve"]
+    assert audits and audits[0]["tt"] == "user" and audits[0]["ti"] == "u-a1"
+    assert audits[0]["t"] == TENANT_A and audits[0]["a"] == "admin-1"
+    detail = json.loads(audits[0]["d"])
+    assert detail["old_role"] == "employee" and detail["new_role"] == "manager"
+    assert detail["old_status"] == "pending" and detail["new_status"] == "approved"
+
+    # change_user_role
+    old2 = _userrow("u-a1", "a1@x.io", "manager", "approved", tenant=TENANT_A)
+    updated2 = _userrow("u-a1", "a1@x.io", "hr", "approved", tenant=TENANT_A)
+    db2 = FakeDb([FakeResult([old2]), FakeResult([updated2])])
+    run(AR.change_user_role("u-a1", ApproveUserRequest(role="hr"), _admin(tenant=TENANT_A), db2))
+    audits2 = [p for p in db2.params if p and p.get("act") == "user.role_update"]
+    assert audits2 and audits2[0]["tt"] == "user" and audits2[0]["ti"] == "u-a1"
+    detail2 = json.loads(audits2[0]["d"])
+    assert detail2["old_role"] == "manager" and detail2["new_role"] == "hr"

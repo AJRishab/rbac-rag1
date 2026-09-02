@@ -5,20 +5,41 @@ out here with its behavior unchanged (same SQL, same RBAC filter inside the
 WHERE clause).
 
 RBAC is enforced INSIDE the SQL query on BOTH legs (``WHERE d.status =
-'published' AND c.allowed_roles && ARRAY[:role]``) so restricted chunks never
-leave the database for an unauthorized caller. A post-fusion
-:func:`assert_rbac` step adds defense-in-depth: it should never fire, and if it
-does it means the pre-filter regressed and must be surfaced loudly.
+'published' AND c.tenant_id = CAST(:tenant AS uuid) AND c.acl_principals &&
+:principals``) so restricted chunks never leave the database for an
+unauthorized caller — neither for role/principal reasons nor because they
+belong to another tenant. A post-fusion :func:`assert_rbac` step adds
+defense-in-depth (principals AND tenant): it should never fire, and if it does
+it means the pre-filter regressed and must be surfaced loudly.
+
+ADMIN BYPASS IS TENANT-SCOPED (behavior change from "admin sees everything"):
+an admin skips the ``acl_principals`` check but every query still carries
+``tenant_id = :tenant``. An admin from tenant A never sees tenant B's rows.
 """
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from rank_bm25 import BM25Okapi
 
 logger = logging.getLogger(__name__)
+
+# Tenant all pre-migration rows live in (see migrations/003_tenant_acl_audit.sql).
+# A caller that somehow arrives without a tenant falls back to THIS tenant —
+# never to "no tenant filter" (fail-closed).
+DEFAULT_TENANT_ID = "00000000-0000-0000-0000-000000000001"
+
+
+def principal_list(role: str | None) -> list[str]:
+    """Caller's ACL principals for ``acl_principals && :principals`` checks.
+
+    Today a principal is just the caller's role. When groups arrive later this
+    is the single place to extend (e.g. append ``group:<id>`` entries) — no
+    schema or query changes needed anywhere else.
+    """
+    return [f"role:{role}"] if role else []
 
 # Candidate-pool sizes per leg. Larger than the final top-k so fusion + rerank
 # have a real pool to work with before truncating to TOP_K in the LLM call.
@@ -50,6 +71,11 @@ class RetrievedChunk:
     rrf_score: float = 0.0
     rerank_score: float | None = None
     rerank_rank: int | None = None
+    # tenant / ACL (migrations/003): carried so assert_rbac can verify tenant
+    # match and the UI/audit paths can see the version that was served.
+    tenant_id: str | None = None
+    acl_principals: list[str] = field(default_factory=list)
+    acl_version: int | None = None
 
 
 def _tokenize(text_: str) -> list[str]:
@@ -69,6 +95,9 @@ def _chunk_from_dense_row(row, rank: int) -> RetrievedChunk:
         page=row.source_page,
         distance=float(row.distance),
         dense_rank=rank,
+        tenant_id=str(row.tenant_id) if row.tenant_id else None,
+        acl_principals=list(row.acl_principals or []),
+        acl_version=row.acl_version,
     )
 
 
@@ -77,48 +106,59 @@ async def _dense_retrieve(
     q_vec: str,
     role: str | None,
     admin_bypass: bool,
+    tenant: str | None = None,
     k: int = DENSE_K,
 ) -> tuple[list[RetrievedChunk], list[dict]]:
-    """RBAC pre-filtered dense retrieval (role check INSIDE SQL), or admin bypass.
+    """RBAC pre-filtered dense retrieval (ACL + tenant check INSIDE SQL), or
+    tenant-scoped admin bypass.
 
-    Returns ``(chunks, blocked_details)``. For admin bypass the status/role
-    filter is omitted exactly as the pre-existing ``_retrieve_admin`` did, and
-    blocked is empty.
+    Returns ``(chunks, blocked_details)``. Admin bypass skips the
+    ``acl_principals`` check but ALWAYS keeps ``tenant_id = :tenant`` — an
+    admin from tenant A must never see tenant B's documents.
     """
+    tenant_uuid = tenant or DEFAULT_TENANT_ID
+
     if admin_bypass:
+        # Tenant-scoped bypass: principals check skipped, tenant check kept.
         rows = (await db.execute(
             text(
                 "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.content, c.allowed_roles, "
+                "c.acl_principals, c.acl_version, c.tenant_id, "
                 "d.title AS doc_title, d.filename AS source, (c.embedding <=> CAST(:q AS vector)) AS distance "
                 "FROM chunks c JOIN documents d ON d.id = c.document_id "
+                "WHERE c.tenant_id = CAST(:tenant AS uuid) "
                 "ORDER BY c.embedding <=> CAST(:q AS vector) LIMIT :k"
             ),
-            {"q": q_vec, "k": k},
+            {"q": q_vec, "k": k, "tenant": tenant_uuid},
         )).fetchall()
         return [_chunk_from_dense_row(r, i + 1) for i, r in enumerate(rows)], []
 
     rows = (await db.execute(
         text(
             "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.content, c.allowed_roles, "
+            "c.acl_principals, c.acl_version, c.tenant_id, "
             "d.title AS doc_title, d.filename AS source, (c.embedding <=> CAST(:q AS vector)) AS distance "
             "FROM chunks c JOIN documents d ON d.id = c.document_id "
-            "WHERE d.status = 'published' AND c.allowed_roles && :r "
+            "WHERE d.status = 'published' AND c.tenant_id = CAST(:tenant AS uuid) "
+            "AND c.acl_principals && :principals "
             "ORDER BY c.embedding <=> CAST(:q AS vector) LIMIT :k"
         ),
-        {"q": q_vec, "r": [role], "k": k},
+        {"q": q_vec, "principals": principal_list(role), "tenant": tenant_uuid, "k": k},
     )).fetchall()
 
     # Unfiltered measurement for the transparency/blocked list (same approach as
     # the pre-existing _retrieve_role_filtered): what the role could NOT see.
+    # TENANT-SCOPED on purpose: cross-tenant rows must not even leak their
+    # title/filename metadata into the blocked list.
     unfiltered = (await db.execute(
         text(
             "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.allowed_roles, "
             "d.title AS doc_title, d.filename AS source "
             "FROM chunks c JOIN documents d ON d.id = c.document_id "
-            "WHERE d.status = 'published' "
+            "WHERE d.status = 'published' AND c.tenant_id = CAST(:tenant AS uuid) "
             "ORDER BY c.embedding <=> CAST(:q AS vector) LIMIT :k"
         ),
-        {"q": q_vec, "k": k},
+        {"q": q_vec, "k": k, "tenant": tenant_uuid},
     )).fetchall()
 
     kept_ids = {r.chunk_id for r in rows}
@@ -142,37 +182,46 @@ async def _lexical_retrieve(
     query_text: str,
     role: str | None,
     admin_bypass: bool,
+    tenant: str | None = None,
     k: int = LEXICAL_K,
 ) -> list[RetrievedChunk]:
-    """In-process, real BM25 over the RBAC pre-filtered candidate pool.
+    """In-process, real BM25 over the ACL+tenant pre-filtered candidate pool.
 
-    Queries only published chunks the caller's role may see (admins bypass the
-    filter, mirroring the dense leg). The candidate pool is fetched from
-    Postgres and scored with rank_bm25 — restricted chunks never leave the DB.
+    Queries only published chunks the caller's principals may see in the
+    caller's tenant (admins bypass the principals filter but stay tenant-scoped,
+    mirroring the dense leg). The candidate pool is fetched from Postgres and
+    scored with rank_bm25 — restricted chunks never leave the DB.
     """
     tokens = _tokenize(query_text)
     if not tokens:
         return []
 
+    tenant_uuid = tenant or DEFAULT_TENANT_ID
+
     if admin_bypass:
         rows = (await db.execute(
             text(
                 "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.content, c.allowed_roles, "
+                "c.acl_principals, c.acl_version, c.tenant_id, "
                 "d.title AS doc_title, d.filename AS source "
                 "FROM chunks c JOIN documents d ON d.id = c.document_id "
+                "WHERE c.tenant_id = CAST(:tenant AS uuid) "
                 "ORDER BY c.id"
             ),
+            {"tenant": tenant_uuid},
         )).fetchall()
     else:
         rows = (await db.execute(
             text(
                 "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, c.content, c.allowed_roles, "
+                "c.acl_principals, c.acl_version, c.tenant_id, "
                 "d.title AS doc_title, d.filename AS source "
                 "FROM chunks c JOIN documents d ON d.id = c.document_id "
-                "WHERE d.status = 'published' AND c.allowed_roles && :r "
+                "WHERE d.status = 'published' AND c.tenant_id = CAST(:tenant AS uuid) "
+                "AND c.acl_principals && :principals "
                 "ORDER BY c.id"
             ),
-            {"r": [role]},
+            {"principals": principal_list(role), "tenant": tenant_uuid},
         )).fetchall()
 
     if not rows:
@@ -201,6 +250,9 @@ async def _lexical_retrieve(
             page=r.source_page,
             bm25_score=float(scores[idx]),
             lexical_rank=rank,
+            tenant_id=str(r.tenant_id) if r.tenant_id else None,
+            acl_principals=list(r.acl_principals or []),
+            acl_version=r.acl_version,
         ))
     return chunks
 
@@ -279,34 +331,40 @@ def is_inventory_question(text: str) -> bool:
     return True
 
 
-async def list_documents(db: AsyncSession, role: str | None, admin_bypass: bool = False) -> list[dict]:
+async def list_documents(
+    db: AsyncSession, role: str | None, admin_bypass: bool = False, tenant: str | None = None,
+) -> list[dict]:
     """RBAC-filtered corpus inventory, queried directly from `documents`.
 
-    Mirrors the RBAC contract in :func:`_dense_retrieve` exactly:
+    Mirrors the ACL contract in :func:`_dense_retrieve` exactly:
     non-admin callers are restricted in SQL to ``status = 'published'`` AND
-    ``allowed_roles && ARRAY[:role]``; admin bypass drops the filter so the
-    caller sees every document regardless of status/role.
+    ``acl_principals && :principals``; admin bypass drops the principals filter
+    but ALWAYS keeps ``tenant_id = :tenant`` (an admin never sees another
+    tenant's documents), regardless of status/role otherwise.
 
     Returns dicts with title (falling back to filename when title is empty),
     filename, status, allowed_roles — the fields needed to answer inventory
     questions without ever touching chunks or the LLM.
     """
+    tenant_uuid = tenant or DEFAULT_TENANT_ID
     if admin_bypass:
         sql = (
             "SELECT id, title, filename, status, allowed_roles "
             "FROM documents "
+            "WHERE tenant_id = CAST(:tenant AS uuid) "
             "ORDER BY title NULLS LAST, filename"
         )
-        result = await db.execute(text(sql))
+        result = await db.execute(text(sql), {"tenant": tenant_uuid})
     else:
         sql = (
             "SELECT id, title, filename, status, allowed_roles "
             "FROM documents "
             "WHERE status = 'published' "
-            "  AND allowed_roles && ARRAY[:role] "
+            "  AND tenant_id = CAST(:tenant AS uuid) "
+            "  AND acl_principals && :principals "
             "ORDER BY title NULLS LAST, filename"
         )
-        result = await db.execute(text(sql), {"role": role})
+        result = await db.execute(text(sql), {"principals": principal_list(role), "tenant": tenant_uuid})
     rows = result.fetchall()
     out: list[dict] = []
     for r in rows:
@@ -472,29 +530,36 @@ async def _authorized_documents(
     db: AsyncSession,
     role: str | None,
     admin_bypass: bool,
+    tenant: str | None = None,
     limit: int = 200,
 ) -> list[dict]:
-    """All documents the caller may *see* - RBAC boundary enforced in SQL.
+    """All documents the caller may *see* - ACL boundary enforced in SQL.
 
-    Non-admin: ``status='published' AND allowed_roles && ARRAY[:role]``.
-    Admin: bypass (sees everything, exactly like the dense leg). Unauthorized
-    documents never leave the database, so nothing about them (filename, title,
-    existence, ambiguity hints) can leak into resolution results.
+    Non-admin: ``status='published' AND tenant_id = :tenant AND
+    acl_principals && :principals``. Admin: bypasses the principals check but
+    stays tenant-scoped (exactly like the dense leg). Unauthorized or
+    cross-tenant documents never leave the database, so nothing about them
+    (filename, title, existence, ambiguity hints) can leak into resolution
+    results.
     """
+    tenant_uuid = tenant or DEFAULT_TENANT_ID
     if admin_bypass:
         sql = (
             "SELECT id, title, filename, status, allowed_roles "
-            "FROM documents ORDER BY filename LIMIT :lim"
+            "FROM documents WHERE tenant_id = CAST(:tenant AS uuid) ORDER BY filename LIMIT :lim"
         )
-        rows = (await db.execute(text(sql), {"lim": limit})).fetchall()
+        rows = (await db.execute(text(sql), {"tenant": tenant_uuid, "lim": limit})).fetchall()
     else:
         sql = (
             "SELECT id, title, filename, status, allowed_roles "
             "FROM documents "
-            "WHERE status = 'published' AND allowed_roles && ARRAY[:role] "
+            "WHERE status = 'published' AND tenant_id = CAST(:tenant AS uuid) "
+            "AND acl_principals && :principals "
             "ORDER BY filename LIMIT :lim"
         )
-        rows = (await db.execute(text(sql), {"role": role, "lim": limit})).fetchall()
+        rows = (await db.execute(
+            text(sql), {"principals": principal_list(role), "tenant": tenant_uuid, "lim": limit},
+        )).fetchall()
     return [
         {
             "id": str(r.id),
@@ -552,14 +617,15 @@ async def resolve_document(
     ref: dict,
     role: str | None,
     admin_bypass: bool,
+    tenant: str | None = None,
 ) -> list[dict]:
     """Resolve ``ref`` against authorized documents. Returns 0/1/N matches.
 
     Only documents the caller may access are ever queried (SQL filter, see
-    :func:`_authorized_documents`), so an inaccessible document cannot be
-    distinguished from a nonexistent one.
+    :func:`_authorized_documents`), so an inaccessible — or cross-tenant —
+    document cannot be distinguished from a nonexistent one.
     """
-    docs = await _authorized_documents(db, role, admin_bypass)
+    docs = await _authorized_documents(db, role, admin_bypass, tenant=tenant)
     return _match_documents(docs, ref)
 
 
@@ -568,25 +634,32 @@ async def resolve_document_by_id(
     document_id: str,
     role: str | None,
     admin_bypass: bool,
+    tenant: str | None = None,
 ) -> dict | None:
     """Re-check current authorization for a known document id (contextual refs).
 
-    Re-authorization happens in SQL so a document that became inaccessible or
-    was deleted after it appeared in conversation history resolves to ``None``.
+    Re-authorization happens in SQL so a document that became inaccessible,
+    moved to another tenant, or was deleted after it appeared in conversation
+    history resolves to ``None``.
     """
+    tenant_uuid = tenant or DEFAULT_TENANT_ID
     if admin_bypass:
+        # Tenant-scoped bypass: principals check skipped, tenant check kept.
         sql = (
             "SELECT id, title, filename, status, allowed_roles FROM documents "
-            "WHERE id = CAST(:id AS uuid)"
+            "WHERE id = CAST(:id AS uuid) AND tenant_id = CAST(:tenant AS uuid)"
         )
-        row = (await db.execute(text(sql), {"id": document_id})).first()
+        row = (await db.execute(text(sql), {"id": document_id, "tenant": tenant_uuid})).first()
     else:
         sql = (
             "SELECT id, title, filename, status, allowed_roles FROM documents "
             "WHERE id = CAST(:id AS uuid) "
-            "AND status = 'published' AND allowed_roles && ARRAY[:role]"
+            "AND status = 'published' AND tenant_id = CAST(:tenant AS uuid) "
+            "AND acl_principals && :principals"
         )
-        row = (await db.execute(text(sql), {"id": document_id, "role": role})).first()
+        row = (await db.execute(
+            text(sql), {"id": document_id, "principals": principal_list(role), "tenant": tenant_uuid},
+        )).first()
     if not row:
         return None
     return {
@@ -603,31 +676,36 @@ async def document_chunks(
     document_id: str,
     role: str | None,
     admin_bypass: bool,
+    tenant: str | None = None,
     limit: int | None = None,
 ) -> list[RetrievedChunk]:
     """ALL chunks of ONE resolved document, in document (chunk_index) order.
 
-    RBAC is enforced INSIDE the SQL: document must still be published AND the
-    chunk's ``allowed_roles`` must include the caller role (non-admin). Admin
-    bypass mirrors the dense leg (no status/role conditions). Never retrieve
-    then filter in Python - restricted chunks for an unauthorized caller never
-    leave the database.
+    RBAC is enforced INSIDE the SQL: the document must belong to the caller's
+    tenant, and (non-admin) it must still be published AND the chunk's
+    ``acl_principals`` must overlap the caller's principals. Admin bypass
+    mirrors the dense leg: principals filter skipped, tenant filter KEPT.
+    Never retrieve then filter in Python — restricted chunks for an
+    unauthorized caller never leave the database.
     """
+    tenant_uuid = tenant or DEFAULT_TENANT_ID
     base = (
         "SELECT c.id AS chunk_id, c.document_id, c.chunk_index, c.source_page, "
-        "c.content, c.allowed_roles, d.title AS doc_title, d.filename AS source "
+        "c.content, c.allowed_roles, c.acl_principals, c.acl_version, c.tenant_id, "
+        "d.title AS doc_title, d.filename AS source "
         "FROM chunks c JOIN documents d ON d.id = c.document_id "
         "WHERE c.document_id = CAST(:id AS uuid) "
+        "AND c.tenant_id = CAST(:tenant AS uuid) "
     )
     if admin_bypass:
         sql = base + "ORDER BY c.chunk_index"
-        params: dict = {"id": document_id}
+        params: dict = {"id": document_id, "tenant": tenant_uuid}
     else:
         sql = base + (
-            "AND d.status = 'published' AND c.allowed_roles && :r "
+            "AND d.status = 'published' AND c.acl_principals && :principals "
             "ORDER BY c.chunk_index"
         )
-        params = {"id": document_id, "r": [role]}
+        params = {"id": document_id, "principals": principal_list(role), "tenant": tenant_uuid}
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
     rows = (await db.execute(text(sql), params)).fetchall()
@@ -641,30 +719,52 @@ async def document_chunks(
             title=r.doc_title,
             source=r.source,
             page=r.source_page,
+            tenant_id=str(r.tenant_id) if r.tenant_id else None,
+            acl_principals=list(r.acl_principals or []),
+            acl_version=r.acl_version,
         )
         for r in rows
     ]
 
 
-def assert_rbac(chunks: list[RetrievedChunk], role: str | None, admin_bypass: bool = False) -> None:
+def assert_rbac(
+    chunks: list[RetrievedChunk],
+    role: str | None,
+    admin_bypass: bool = False,
+    tenant: str | None = None,
+) -> None:
     """Defense-in-depth check — never expected to fire.
 
-    The real enforcement already happened inside SQL (``allowed_roles &&
-    ARRAY[:role]``). If a fused chunk reaches app memory that the caller cannot
-    read, the pre-filter regressed and we must surface it loudly rather than
-    silently continue.
+    The real enforcement already happened inside SQL (``tenant_id = :tenant AND
+    acl_principals && :principals``). If a fused chunk reaches app memory that
+    the caller cannot read — for principal OR tenant reasons — the pre-filter
+    regressed and we must surface it loudly rather than silently continue.
+
+    Chunks that carry no ``tenant_id`` (legacy fixtures) cannot be tenant
+    checked here; production rows always have one, so this is best-effort only
+    and the SQL-level tenant filter remains the real boundary.
     """
     if admin_bypass:
         return
-    bad = [c.id for c in chunks if role not in (c.allowed_roles or [])]
-    if bad:
+    bad_principals = [
+        c.id for c in chunks
+        if role not in (c.allowed_roles or [])
+        and f"role:{role}" not in (c.acl_principals or [])
+    ]
+    bad_tenant = [
+        c.id for c in chunks
+        if tenant and c.tenant_id and c.tenant_id != tenant
+    ]
+    if bad_principals or bad_tenant:
         logger.error(
-            "RBAC defense-in-depth check FAILED: %d unauthorized chunk(s) reached fusion (%s), role=%s",
-            len(bad), bad, role,
+            "RBAC defense-in-depth check FAILED: %d unauthorized and %d cross-tenant "
+            "chunk(s) reached fusion (principal_bad=%s, tenant_bad=%s), role=%s, tenant=%s",
+            len(bad_principals), len(bad_tenant), bad_principals, bad_tenant, role, tenant,
         )
         raise RuntimeError(
-            f"RBAC defense-in-depth check failed: {len(bad)} chunk(s) not authorized for role "
-            f"'{role}': {bad}"
+            f"RBAC defense-in-depth check failed: "
+            f"{len(bad_principals)} chunk(s) not authorized for principal 'role:{role}' "
+            f"{bad_principals}; {len(bad_tenant)} chunk(s) from another tenant {bad_tenant}"
         )
 
 
@@ -674,14 +774,16 @@ async def hybrid_retrieve(
     query_text: str,
     role: str | None,
     admin_bypass: bool = False,
+    tenant: str | None = None,
 ) -> tuple[list[RetrievedChunk], list[dict]]:
-    """Dense + BM25 lexical + RRF fusion, RBAC-filtered in SQL on both legs.
+    """Dense + BM25 lexical + RRF fusion, ACL-filtered in SQL on both legs.
 
     Returns ``(fused_chunks, blocked_details)``. The fused list (top ``FUSE_K``)
     is in RRF order and is the input to the reranker. ``blocked_details`` is
-    only meaningful for non-admin callers (dense-leg unfiltered measurement).
+    only meaningful for non-admin callers (dense-leg unfiltered measurement,
+    tenant-scoped so cross-tenant metadata never leaks).
     """
-    dense, blocked = await _dense_retrieve(db, q_vec, role, admin_bypass)
-    lexical = await _lexical_retrieve(db, query_text, role, admin_bypass)
+    dense, blocked = await _dense_retrieve(db, q_vec, role, admin_bypass, tenant=tenant)
+    lexical = await _lexical_retrieve(db, query_text, role, admin_bypass, tenant=tenant)
     fused = _rrf_fuse(dense, lexical)
     return fused, blocked

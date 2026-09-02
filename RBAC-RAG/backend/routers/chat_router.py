@@ -306,12 +306,13 @@ async def _handle_document_summary(
     question: str,
     role: str,
     admin_bypass: bool,
+    tenant: str | None = None,
 ) -> AskResponse:
     """Document-scoped summary path: resolve -> RBAC re-check -> chunks -> summarize.
 
     Never falls back to global RAG on resolution/authorization failure: it
     returns a safe clarification/no-match response instead, so an inaccessible
-    document is indistinguishable from a nonexistent one.
+    (or cross-tenant) document is indistinguishable from a nonexistent one.
     """
     ref = document_reference(question)
     matched: list[dict] = []
@@ -320,7 +321,7 @@ async def _handle_document_summary(
     candidates: list[dict] = []
 
     if ref["kind"] in ("filename", "numeric"):
-        matched = await resolve_document(db, ref, role, admin_bypass)
+        matched = await resolve_document(db, ref, role, admin_bypass, tenant=tenant)
         if len(matched) == 1:
             doc = matched[0]
         elif len(matched) > 1:
@@ -336,7 +337,7 @@ async def _handle_document_summary(
         elif ctx == "__ambiguous__":
             reason = "ambiguous_context"
         else:
-            doc = await resolve_document_by_id(db, ctx, role, admin_bypass)
+            doc = await resolve_document_by_id(db, ctx, role, admin_bypass, tenant=tenant)
             if doc is None:
                 reason = "unauthorized_deleted"
 
@@ -373,7 +374,7 @@ async def _handle_document_summary(
         )
 
     # Authorized document resolved -> fetch ONLY its chunks with RBAC inside SQL.
-    chunks = await document_chunks(db, doc["id"], role, admin_bypass)
+    chunks = await document_chunks(db, doc["id"], role, admin_bypass, tenant=tenant)
     if not chunks:
         answer = _clarify_message("no_chunks")
         retrieval_detail = {
@@ -405,7 +406,7 @@ async def _handle_document_summary(
         )
 
     # Defense-in-depth: chunk-level RBAC re-check (should never fire — SQL filtered).
-    assert_rbac(chunks, role, admin_bypass)
+    assert_rbac(chunks, role, admin_bypass, tenant=tenant)
 
     # Section scoping: "summarize the abstract" narrows the RBAC-verified chunk
     # list to the named section's contiguous chunks (heading-based, generic —
@@ -475,6 +476,7 @@ async def _handle_document_summary(
 async def ask(req: AskRequest, user: dict = Depends(require_approved), db: AsyncSession = Depends(get_db)):
     role = user["role"]
     admin_bypass = (role == "admin")
+    tenant = user.get("tenant_id")
 
     conv_id = await _ensure_conversation(db, user["id"], req.conversation_id, req.question)
     user_row = await _insert_user_message(db, conv_id, req.question)
@@ -485,7 +487,7 @@ async def ask(req: AskRequest, user: dict = Depends(require_approved), db: Async
     # Route them to a direct, RBAC-filtered documents query instead — BEFORE any
     # embedding / retrieval / reranking, so inventory questions never hit NIM.
     if is_inventory_question(req.question):
-        docs = await list_documents(db, role, admin_bypass)
+        docs = await list_documents(db, role, admin_bypass, tenant=tenant)
         answer = format_document_inventory(docs, role)
         retrieval_detail = {
             "retrieved": [],
@@ -524,18 +526,19 @@ async def ask(req: AskRequest, user: dict = Depends(require_approved), db: Async
     # document coverage). Resolve the requested document strictly against
     # authorized metadata, then summarize ONLY that document's chunks.
     if is_document_summary_question(req.question):
-        return await _handle_document_summary(db, conv_id, user_row, req.question, role, admin_bypass)
+        return await _handle_document_summary(db, conv_id, user_row, req.question, role, admin_bypass, tenant=tenant)
 
     # Embed the question
     q_emb = (await nim_client.embed([req.question], input_type="query"))[0]
     q_vec = fmt_vec(q_emb)
 
     # Hybrid retrieval: dense (pgvector) + BM25 lexical + RRF fusion, with RBAC
-    # pre-filtered inside SQL on both legs (admin bypass skips that filter).
-    fused, blocked = await hybrid_retrieve(db, q_vec, req.question, role, admin_bypass)
+    # pre-filtered inside SQL on both legs (admin bypass skips the principals
+    # filter but is still tenant-scoped).
+    fused, blocked = await hybrid_retrieve(db, q_vec, req.question, role, admin_bypass, tenant=tenant)
 
     # Defense-in-depth: never expected to fire (real enforcement is in SQL).
-    assert_rbac(fused, role, admin_bypass)
+    assert_rbac(fused, role, admin_bypass, tenant=tenant)
 
     # Rerank the fused candidates down to the final TOP_K sent to the LLM.
     ranked = await rerank(fused, req.question)
