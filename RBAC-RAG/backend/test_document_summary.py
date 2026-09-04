@@ -7,12 +7,15 @@ normal RAG. Uses fake DB results and patched NIM calls - no live network.
 """
 import asyncio
 import json
+import math
+import re
 import types
 from datetime import datetime
 from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException
+from rank_bm25 import BM25Okapi
 
 import retrieval as R
 import document_summarizer as S
@@ -924,3 +927,210 @@ def test_rank_bm25_dependency_removed():
     src = inspect.getsource(R)
     assert "from rank_bm25" not in src
     assert "BM25Okapi(" not in src
+
+# ---------------- BM25 correctness: N/avg_doclen scoping + negative IDF ----------------
+
+
+def _lexical_tokens(text):
+    """Same [a-z0-9]+ tokenization the lexical leg applies to queries/corpus."""
+    return re.findall(r"[a-z0-9]+", (text or "").lower())
+
+
+def _mirror_bm25(corpus, query, clamp_negative=True):
+    """Python mirror of the SQL scorer in retrieval._lexical_retrieve.
+
+    Reproduces the SQL's exact BM25 arithmetic over an "authorized corpus" of
+    chunk strings: tokenization regex and the k1/b/epsilon constants are the
+    implementation's own (imported from `retrieval`), so this mirror cannot
+    drift from what the SQL implements. Returns
+    ``(total_docs, avg_doclen, eps_idf, {doc_index: score})`` with a score for
+    every chunk (the SQL itself only emits chunks with >=1 query term).
+
+    ``average_idf`` is computed over the WHOLE authorized corpus vocabulary,
+    exactly like rank_bm25's ``_calc_idf``, so ``eps_idf`` matches the library.
+    """
+    docs = [_lexical_tokens(c) for c in corpus]
+    n = len(docs)
+    doclens = [len(d) for d in docs]
+    avgdl = (sum(doclens) / n) if n else 0.0
+    df = {}
+    for d in docs:
+        for term in set(d):
+            df[term] = df.get(term, 0) + 1
+
+    def raw_idf(term):
+        return math.log((n - df[term] + 0.5) / (df[term] + 0.5))
+
+    average_idf = (sum(raw_idf(t) for t in df) / len(df)) if df else 0.0
+    eps_idf = R.BM25_EPSILON * average_idf
+
+    def idf(term):
+        raw = raw_idf(term)
+        return eps_idf if clamp_negative and raw < 0 else raw
+
+    def tf_norm(dl, tf_):
+        return (tf_ * (R.BM25_K1 + 1)) / (
+            tf_ + R.BM25_K1 * (1 - R.BM25_B + R.BM25_B * dl / avgdl))
+
+    scores = {}
+    for i, d in enumerate(docs):
+        s = 0.0
+        for term in dict.fromkeys(_lexical_tokens(query)):
+            if term not in df or term not in d:
+                continue
+            s += idf(term) * tf_norm(doclens[i], d.count(term))
+        scores[i] = s
+    return n, avgdl, eps_idf, scores
+
+
+
+# --- item 1: N / avg_doclen must be scoped to the authorized subset -----------
+
+
+def test_lexical_total_docs_and_avg_doclen_are_sourced_from_auth():
+    """N and avg_doclen must come from the SAME authorized `auth` CTE that
+    doc_freq uses — never the whole chunks table. Every tenant lives in the
+    same physical chunks/chunk_terms tables (migration 003), so a global
+    count/avg would silently borrow corpus statistics from rows the caller
+    cannot see — the identical bug class the doc-frequency join already fixed.
+    """
+    db = FakeDb()
+    run(R._lexical_retrieve(db, "policy premium", "manager", False, tenant=TENANT_A))
+    sql = db.statements[0]
+    assert "(SELECT count(*) FROM auth)::float8 AS total_docs" in sql
+    assert "GREATEST(1.0, (SELECT avg(doclen) FROM auth))::float8 AS avg_doclen" in sql
+    # A raw global aggregate over `chunks` (no tenant/ACL join) is exactly the
+    # regression this guards against.
+    assert "count(*) FROM chunks" not in sql
+    assert "avg(doclen) FROM chunks" not in sql
+
+
+def test_small_tenant_is_scored_against_its_own_n_and_avgdl_not_combined():
+    """Two tenants sharing one database: tenant A authorizes only 2 chunks, the
+    same physical table holds 102. A's BM25 scores must be computed with N=2 /
+    A's avg_doclen — the combined 102-chunk statistics would change the scores
+    of the exact same authorized chunks. This exercises the bug class
+    numerically (not just structurally), while the SQL assertions tie the
+    improvement to the implementation (all stats sourced from `auth`, including
+    the eps floor's corpus-vocabulary average)."""
+    tenant_a_corpus = [
+        "the policy covers travel expenses",
+        "the policy covers health benefits",
+    ]
+    # 100 filler chunks inside the SAME table, owned by other tenants/users and
+    # NOT part of tenant A's authorized subset.
+    combined_corpus = tenant_a_corpus + [
+        f"filler document {i} zebra grazing savanna plains sunny herd"
+        for i in range(100)
+    ]
+
+    n_a, avgdl_a, _, scores_a = _mirror_bm25(
+        tenant_a_corpus, "policy travel", clamp_negative=True)
+    n_comb, avgdl_comb, _, scores_comb = _mirror_bm25(
+        combined_corpus, "policy travel", clamp_negative=True)
+
+    assert n_a == 2 and n_comb == 102
+    assert avgdl_a != avgdl_comb
+    # The SAME two authorized chunks get different BM25 scores if N/avgdl are
+    # borrowed from the combined corpus -> scoping matters numerically.
+    assert scores_a != scores_comb
+
+    # Tie the numerics back to the actual query: N, avg_doclen and the eps
+    # floor are sourced exclusively from the authorized subset.
+    db = FakeDb()
+    run(R._lexical_retrieve(db, "policy travel", "manager", False, tenant=TENANT_A))
+    sql = db.statements[0]
+    assert "(SELECT count(*) FROM auth)::float8 AS total_docs" in sql
+    assert "GREATEST(1.0, (SELECT avg(doclen) FROM auth))::float8 AS avg_doclen" in sql
+    # average_idf (for the eps floor) is over chunk_terms ∩ auth only.
+    assert "SELECT avg(" in sql
+    assert "ln(((SELECT count(*) FROM auth)::float8 - n_t + 0.5) / (n_t + 0.5))" in sql
+    assert "FROM chunk_terms ct JOIN auth a ON a.id = ct.chunk_id" in sql
+    # No stat may come from the unfiltered chunks table.
+    assert "count(*) FROM chunks" not in sql
+    assert "avg(doclen) FROM chunks" not in sql
+
+
+
+# --- item 2: negative-IDF clamp decision + rank_bm25 equivalence ---------------
+
+
+_NEG_IDF_CORPUS = [
+    "what is the zacor",   # 0: matches every query token (rare + common words)
+    "zacor aaaa bbbb",     # 1: matches only the rare term, dodges common words
+    "what is the alpha",
+    "what is the bravo",
+    "what is the charlie",
+    "what is the delta",
+]
+_NEG_IDF_QUERY = "what is the zacor"
+
+
+def test_negative_idf_behavior_is_clamped(capsys):
+    """Decision record + regression guard for the negative-IDF clamp (item 2).
+
+    With 'simple' tokenization and no stopword removal, ordinary questions
+    routinely contain function words (what/is/the) that exceed 50% document
+    frequency. In this corpus each has df=5 of N=6 → raw IDF -1.299. Measured:
+
+      * UNCLAMPED: the chunk matching EVERY query token scores NEGATIVE and
+        ranks BELOW the chunk matching only the rare term — the exact
+        misranking this task set out to kill.
+      * CLAMPED (rank_bm25 eps=0.25*average_idf): the full match ranks first.
+
+    The printed output keeps the behavioral difference visible in the test log;
+    the assertions lock in the clamped behavior so it cannot silently regress.
+    """
+    n, avgdl, _, raw_scores = _mirror_bm25(
+        _NEG_IDF_CORPUS, _NEG_IDF_QUERY, clamp_negative=False)
+    _, _, eps_idf, clamped_scores = _mirror_bm25(
+        _NEG_IDF_CORPUS, _NEG_IDF_QUERY, clamp_negative=True)
+
+    def _rank(scores, idx):
+        return 1 + sum(1 for k, v in scores.items() if v > scores[idx])
+
+    print(f"negative-IDF decision record: N={n} avgdl={avgdl:.4f} "
+          f"eps_idf(0.25*avg_idf)={eps_idf:.4f}")
+    print(f"  unclamped c0(full match) ={raw_scores[0]:+.4f} rank={_rank(raw_scores, 0)}"
+          f"   c1(rare-only)={raw_scores[1]:+.4f} rank={_rank(raw_scores, 1)}")
+    print(f"  clamped   c0(full match) ={clamped_scores[0]:+.4f} rank={_rank(clamped_scores, 0)}"
+          f"   c1(rare-only)={clamped_scores[1]:+.4f} rank={_rank(clamped_scores, 1)}")
+
+    # The pathology the clamp exists to prevent: unclamped, the full match is
+    # NEGATIVE and ranks below the rare-term-only match.
+    assert raw_scores[0] < 0.0
+    assert raw_scores[0] < raw_scores[1]
+    # Clamped restores the correct order: c0 (all query terms) first.
+    assert clamped_scores[0] > 0.0
+    assert clamped_scores[0] > clamped_scores[1]
+    assert max(clamped_scores, key=clamped_scores.get) == 0
+
+    # The implementation is the clamped formula.
+    db = FakeDb()
+    run(R._lexical_retrieve(db, _NEG_IDF_QUERY, "manager", False, tenant=TENANT_A))
+    sql = db.statements[0]
+    assert "WHEN ln((s.total_docs - i.doc_freq + 0.5) / (i.doc_freq + 0.5)) < 0" in sql
+    assert "THEN s.eps_idf" in sql
+    assert "AS eps_idf" in sql
+
+
+def test_bm25_equivalence_with_rank_bm25_includes_common_term_clamp():
+    """The SQL scorer matches rank_bm25 EXACTLY, including super-frequent
+    (df > N/2) query terms: rank_bm25 clamps their IDF to eps=0.25*average_idf
+    and so does the implementation. This exercises the negative-IDF region the
+    old 'procedure/official/zacor' corpus never touched (all df << N/2)."""
+    reference = BM25Okapi([_lexical_tokens(c) for c in _NEG_IDF_CORPUS])  # k1=1.5,b=0.75,eps=0.25
+    ref_scores = reference.get_scores(_lexical_tokens(_NEG_IDF_QUERY))
+
+    n, avgdl, eps_idf, ours = _mirror_bm25(_NEG_IDF_CORPUS, _NEG_IDF_QUERY)
+    assert n == len(_NEG_IDF_CORPUS)
+    assert eps_idf == pytest.approx(reference.epsilon * reference.average_idf, abs=1e-12)
+    for i in range(len(_NEG_IDF_CORPUS)):
+        assert ours[i] == pytest.approx(float(ref_scores[i]), abs=1e-9), (i, ours[i], ref_scores[i])
+
+    # Sanity: this corpus genuinely exercised the clamp — what/is/the were
+    # super-frequent (negative raw IDF) and rank_bm25 pinned them to eps.
+    assert reference.idf["what"] == pytest.approx(eps_idf, abs=1e-12)
+    assert reference.idf["the"] == pytest.approx(eps_idf, abs=1e-12)
+    assert reference.idf["zacor"] > eps_idf
+

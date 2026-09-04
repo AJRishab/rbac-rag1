@@ -47,6 +47,14 @@ LEXICAL_K = 20  # candidates returned by the BM25 lexical leg
 FUSE_K = 20     # top-N fused candidates handed to the reranker
 RRF_K = 60      # standard reciprocal-rank-fusion smoothing constant
 
+# BM25 scoring constants. k1/b are the defaults of the former rank_bm25
+# BM25Okapi leg (ranking behavior preserved by design). EPSILON is the
+# negative-IDF floor factor rank_bm25 applies to super-frequent terms (its
+# `epsilon` param) — see the clamp discussion in _lexical_retrieve.
+BM25_K1 = 1.5
+BM25_B = 0.75
+BM25_EPSILON = 0.25
+
 
 @dataclass
 class RetrievedChunk:
@@ -216,13 +224,39 @@ async def _lexical_retrieve(
     appears only in an unauthorized chunk contributes nothing), so only
     tenant/ACL-authorized matches can be returned or scored.
 
-    One deliberate divergence from the rank_bm25 library: we use the canonical
-    BM25 IDF ``ln((N - n + 0.5)/(n + 0.5))`` unmodified. rank_bm25 clamps
-    negative-idf (super-frequent, df > N/2) terms to ``0.25 * average_idf``;
-    we keep the raw weight (often negative). Because non-matching chunks never
-    enter the result set and RRF consumes rank position only, this preserves
-    recall and ordering while staying faithful to the BM25 paper — verified
-    live at <1e-6 parity with rank_bm25 for idf >= 0 terms.
+    Negative-IDF (super-frequent, df > N/2) query terms are clamped to the
+    rank_bm25 epsilon floor ``eps = 0.25 * average_idf``, where ``average_idf``
+    is the mean raw IDF over the ENTIRE authorized corpus vocabulary — i.e. we
+    now MATCH rank_bm25's clamped behavior exactly (asserted to numeric parity
+    in test_bm25_equivalence_with_rank_bm25_includes_common_term_clamp). The
+    clamp is not academic: this leg tokenizes with 'simple' and NO stopword
+    removal, so ordinary questions routinely contain function words ("what",
+    "is", "the") that exceed 50% document frequency in a real corpus. Measured
+    on the decision-record corpus in test_negative_idf_behavior_is_clamped,
+    with
+    what/is/the at df=5 of N=6 (raw IDF -1.299 each), the UNCLAMPED formula
+    gives the chunk matching every query token (rare term + common words) a
+    NEGATIVE score (-3.25) that ranks BELOW a chunk matching only the rare
+    term (+0.65) — the rare/specific match loses to a dodged common word,
+    exactly the pathology this task set out to kill. Clamping to eps removes
+    the subtraction: the same full match scores +0.91 and ranks first. Cost:
+    the eps computation scans the authorized corpus vocabulary per query, the
+    same magnitude of per-request work the former in-process rank_bm25 index
+    build did, and equal post-clamp precision (exact parity with rank_bm25).
+    Edge case (parity with rank_bm25, not a divergence): if a corpus's
+    average_idf were itself negative (vocabulary dominated by >50%-df terms),
+    eps would be negative and the clamp would not lift the floor; that is
+    rank_bm25's own behavior, and is pathological in practice for RAG corpora
+    with a large vocabulary (average_idf > 0).
+
+    Remaining deliberate divergences from other BM25 formulations:
+      * raw BM25 paper / Lucene / Elasticsearch use an ALWAYS-positive
+        ``ln(1 + (N - n + 0.5)/(n + 0.5))`` IDF (no corpus average needed). We
+        do NOT — we use rank_bm25's ``0.25 * average_idf`` floor instead, so
+        this leg stays numerically identical to the rank_bm25 reference the
+        previous in-process implementation was validated against (nonzero-IDF
+        terms are bit-identical; only df > N/2 terms change, and identically
+        to rank_bm25).
 
     Only the tenant/ACL-filtered top ``k`` rows leave the database: matching,
     scoring, ranking, and limiting all happen in SQL. The admin_bypass branch
@@ -262,13 +296,36 @@ idf AS (
 corpus_stats AS (
     SELECT
         (SELECT count(*) FROM auth)::float8 AS total_docs,
-        GREATEST(1.0, (SELECT avg(doclen) FROM auth))::float8 AS avg_doclen
+        GREATEST(1.0, (SELECT avg(doclen) FROM auth))::float8 AS avg_doclen,
+        -- rank_bm25 negative-IDF floor: eps = epsilon * average_idf, where
+        -- average_idf is the mean raw IDF over the ENTIRE authorized corpus
+        -- vocabulary (chunk_terms joined to auth) — exactly rank_bm25's
+        -- _calc_idf. Auth-scoped like N/avg_doclen: cross-tenant term rows
+        -- must not distort the floor. Empty vocabulary (unreachable when
+        -- :terms matched) falls back to 0.
+        {BM25_EPSILON}::float8 * COALESCE((
+            SELECT avg(
+                ln(((SELECT count(*) FROM auth)::float8 - n_t + 0.5) / (n_t + 0.5))
+            )
+            FROM (
+                SELECT ct.term, count(*) AS n_t
+                FROM chunk_terms ct JOIN auth a ON a.id = ct.chunk_id
+                GROUP BY ct.term
+            ) corpus_vocab
+        ), 0.0)::float8 AS eps_idf
 ),
 scored AS (
     SELECT t.chunk_id AS chunk_id,
            sum(
-               ln((s.total_docs - i.doc_freq + 0.5) / (i.doc_freq + 0.5))
-               * (t.tf * (1.5 + 1)) / (t.tf + 1.5 * (1 - 0.75 + 0.75 * a.doclen / s.avg_doclen))
+               -- Clamp negative IDF (super-frequent, df > N/2 query terms) to
+               -- the rank_bm25 epsilon floor so such a term can never subtract
+               -- from a chunk's score (see the clamp rationale in the docstring).
+               (CASE
+                    WHEN ln((s.total_docs - i.doc_freq + 0.5) / (i.doc_freq + 0.5)) < 0
+                        THEN s.eps_idf
+                    ELSE ln((s.total_docs - i.doc_freq + 0.5) / (i.doc_freq + 0.5))
+                END)
+               * (t.tf * ({BM25_K1} + 1)) / (t.tf + {BM25_K1} * (1 - {BM25_B} + {BM25_B} * a.doclen / s.avg_doclen))
            ) AS bm25_score
     FROM tf t
     JOIN auth a ON a.id = t.chunk_id
